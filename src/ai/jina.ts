@@ -1,12 +1,6 @@
 import path from "node:path";
 import { AutoModel, AutoProcessor, RawImage, env } from "@huggingface/transformers";
-import {
-  embedModel,
-  imagesDir,
-  labelMarginMin,
-  labelScoreMin,
-  projectRoot,
-} from "../config.js";
+import { embedModel, imagesDir, projectRoot } from "../config.js";
 import {
   IMAGE_LABELS,
   ImageLabelSchema,
@@ -143,12 +137,4 @@ export async function embedAndLabel(
   });
 
   return { vector, labels };
-}
-
-export function labelStatus(labels: ImageLabel): "processed" | "flagged" {
-  const margin = labels.score - labels.runnerUpScore;
-  if (labels.score >= labelScoreMin && margin >= labelMarginMin) {
-    return "processed";
-  }
-  return "flagged";
 }

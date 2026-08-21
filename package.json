@@ -8,7 +8,7 @@
     "ingest": "tsx src/scripts/ingest.ts",
     "annotate": "tsx src/scripts/annotate.ts",
     "worker": "tsx src/scripts/worker.ts",
-    "test": "tsx --test src/annotation.test.ts"
+    "test": "tsx --test src/*.test.ts"
   },
   "repository": {
     "type": "git",

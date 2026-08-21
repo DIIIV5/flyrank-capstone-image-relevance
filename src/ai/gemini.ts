@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { GoogleGenerativeAI } from "@google/generative-ai";
-import { geminiApiKey, geminiModel, imagesDir } from "../config.js";
+import { geminiApiKey, geminiModel, geminiThinkingLevel, imagesDir } from "../config.js";
 
 const mimeByExt: Record<string, string> = {
   ".jpg": "image/jpeg",
@@ -31,12 +31,14 @@ export async function annotateImage(filename: string): Promise<unknown> {
 
   const bytes = await fs.readFile(path.join(imagesDir, filename));
   const genAI = new GoogleGenerativeAI(geminiApiKey);
+  const generationConfig = {
+    responseMimeType: "application/json",
+    temperature: 0.2,
+    thinkingConfig: { thinkingLevel: geminiThinkingLevel },
+  };
   const model = genAI.getGenerativeModel({
     model: geminiModel,
-    generationConfig: {
-      responseMimeType: "application/json",
-      temperature: 0.2,
-    },
+    generationConfig,
   });
 
   const result = await model.generateContent([

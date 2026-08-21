@@ -19,7 +19,8 @@ import {
   upsertEmbedding,
 } from "./db.js";
 import { annotateImage } from "./ai/gemini.js";
-import { embedAndLabel, labelStatus } from "./ai/jina.js";
+import { embedAndLabel } from "./ai/jina.js";
+import { labelStatus } from "./labels.js";
 import { ImageAnnotationSchema } from "./types.js";
 
 export type JobName = "embed_image" | "annotate_image";
@@ -51,7 +52,7 @@ export async function enqueueImageJob(
   try {
     await imageQueue.add(name, data, {
       ...jobOpts,
-      jobId: `${name}:${data.contentHash}`,
+      jobId: `${name}-${data.contentHash}`,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

@@ -19,11 +19,10 @@ function required(name: string): string {
 export const databaseUrl = required("DATABASE_URL");
 export const redisUrl = process.env.REDIS_URL ?? "redis://localhost:6379";
 export const geminiApiKey = process.env.GEMINI_API_KEY ?? "";
-export const geminiModel = process.env.GEMINI_MODEL ?? "gemini-2.0-flash";
+export const geminiModel = process.env.GEMINI_MODEL ?? "gemini-3.7-flash";
+export type GeminiThinkingLevel = "minimal" | "low" | "medium" | "high";
+export const geminiThinkingLevel: GeminiThinkingLevel = "minimal";
 export const embedModel = process.env.EMBED_MODEL ?? "jinaai/jina-clip-v2";
-
-export const labelScoreMin = 0.7;
-export const labelMarginMin = 0.15;
 
 /** List price used for ai_usage even on the free tier (one image / call). */
 export const geminiImageCostUsd = 0.00002;
