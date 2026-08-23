@@ -8,6 +8,8 @@
     "ingest": "tsx src/scripts/ingest.ts",
     "annotate": "tsx src/scripts/annotate.ts",
     "worker": "tsx src/scripts/worker.ts",
+    "seed-posts": "tsx src/scripts/seed-posts.ts",
+    "match": "tsx src/scripts/match.ts",
     "test": "tsx --test src/*.test.ts"
   },
   "repository": {

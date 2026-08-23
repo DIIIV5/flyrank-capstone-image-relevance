@@ -138,3 +138,20 @@ export async function embedAndLabel(
 
   return { vector, labels };
 }
+
+export async function embedText(text: string): Promise<number[]> {
+  const jina = await getModels();
+  // This processor build expects text plus an image; a 1x1 placeholder is enough to take the text tower.
+  const placeholder = new RawImage(new Uint8Array([0, 0, 0]), 1, 1, 3);
+  const inputs = await jina.processor([text], [placeholder], {
+    padding: true,
+    truncation: true,
+  });
+  const output = await jina.model(inputs);
+  const textRows = rowsFromTensor(output.l2norm_text_embeddings);
+  const vector = textRows[0];
+  if (!vector) {
+    throw new Error("no text embedding");
+  }
+  return vector;
+}

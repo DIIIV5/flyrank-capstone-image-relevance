@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ImageAnnotationSchema } from "./types.js";
 
-// These tests do not call Gemini. They check the tag JSON shape.
+// Tests in validate that the tag JSON matches the expected schema.
 
 const valid = {
   subject: "red fox",

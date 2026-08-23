@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { labelStatus } from "./labels.js";
 import { ImageLabelSchema, type ImageLabel } from "./types.js";
 
-// These tests do not call Jina. They check the label JSON and the flag rule.
+// These tests check the label JSON and the flag rule. They do not call Jina.
 
 const valid: ImageLabel = {
   label: "fox",

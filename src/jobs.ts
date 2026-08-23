@@ -10,20 +10,23 @@ import {
 } from "./config.js";
 import {
   embeddingExists,
+  getPost,
   markJobFailed,
   markJobRunning,
   markJobSucceeded,
   recordUsage,
+  sampleEmbeddingLength,
   saveImageAnnotation,
   saveImageLabels,
   upsertEmbedding,
 } from "./db.js";
 import { annotateImage } from "./ai/gemini.js";
-import { embedAndLabel } from "./ai/jina.js";
+import { embedAndLabel, embedText } from "./ai/jina.js";
 import { labelStatus } from "./labels.js";
 import { ImageAnnotationSchema } from "./types.js";
 
-export type JobName = "embed_image" | "annotate_image";
+export type ImageJobName = "embed_image" | "annotate_image";
+export type JobName = ImageJobName | "embed_post";
 
 export type ImageJobData = {
   jobRowId: string;
@@ -32,11 +35,18 @@ export type ImageJobData = {
   contentHash: string;
 };
 
+export type PostJobData = {
+  jobRowId: string;
+  postId: string;
+};
+
+export type JobData = ImageJobData | PostJobData;
+
 const QUEUE_NAME = "image-jobs";
 
 const connection = new Redis(redisUrl, { maxRetriesPerRequest: null });
 
-export const imageQueue = new Queue<ImageJobData>(QUEUE_NAME, { connection });
+export const imageQueue = new Queue<JobData>(QUEUE_NAME, { connection });
 
 const jobOpts = {
   attempts: jobAttempts,
@@ -46,7 +56,7 @@ const jobOpts = {
 };
 
 export async function enqueueImageJob(
-  name: JobName,
+  name: ImageJobName,
   data: ImageJobData,
 ): Promise<void> {
   try {
@@ -62,8 +72,27 @@ export async function enqueueImageJob(
   }
 }
 
+export async function enqueuePostJob(data: PostJobData): Promise<void> {
+  try {
+    await imageQueue.add("embed_post", data, {
+      ...jobOpts,
+      // BullMQ custom job ids cannot contain ":".
+      jobId: `embed_post-${data.postId}`,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/already/i.test(message)) {
+      throw error;
+    }
+  }
+}
+
+function isImageJob(data: JobData): data is ImageJobData {
+  return "imageId" in data;
+}
+
 async function processEmbed(data: ImageJobData): Promise<void> {
-  if (await embeddingExists(data.imageId, embedModel)) {
+  if (await embeddingExists("image", data.imageId, embedModel)) {
     return;
   }
 
@@ -89,7 +118,47 @@ async function processEmbed(data: ImageJobData): Promise<void> {
   }
 
   await saveImageLabels(data.imageId, labels, labelStatus(labels));
-  await upsertEmbedding(data.imageId, vector, embedModel);
+  await upsertEmbedding("image", data.imageId, vector, embedModel);
+}
+
+async function processEmbedPost(data: PostJobData): Promise<void> {
+  if (await embeddingExists("post", data.postId, embedModel)) {
+    return;
+  }
+
+  const post = await getPost(data.postId);
+  if (!post) {
+    throw new Error(`post ${data.postId} is missing`);
+  }
+
+  const started = Date.now();
+  let vector: number[] | undefined;
+  try {
+    vector = await embedText(`${post.title}\n\n${post.body}`);
+  } finally {
+    await recordUsage({
+      jobId: data.jobRowId,
+      kind: "local_embed",
+      provider: "transformers.js",
+      model: embedModel,
+      units: 1,
+      costUsd: 0,
+      runtimeMs: Date.now() - started,
+    });
+  }
+
+  if (!vector) {
+    throw new Error(`embed produced no result for post ${data.postId}`);
+  }
+
+  const expectedLength = await sampleEmbeddingLength(embedModel);
+  if (expectedLength !== null && vector.length !== expectedLength) {
+    throw new Error(
+      `post vector length ${vector.length} does not match image vector length ${expectedLength}`,
+    );
+  }
+
+  await upsertEmbedding("post", data.postId, vector, embedModel);
 }
 
 async function processAnnotate(data: ImageJobData): Promise<void> {
@@ -117,13 +186,24 @@ async function processAnnotate(data: ImageJobData): Promise<void> {
   await saveImageAnnotation(data.imageId, parsed.data);
 }
 
-async function processJob(job: Job<ImageJobData, void, JobName>): Promise<void> {
+async function processJob(job: Job<JobData, void, JobName>): Promise<void> {
   await markJobRunning(job.data.jobRowId);
 
   if (job.name === "embed_image") {
+    if (!isImageJob(job.data)) {
+      throw new Error("embed_image job is missing image fields");
+    }
     await processEmbed(job.data);
   } else if (job.name === "annotate_image") {
+    if (!isImageJob(job.data)) {
+      throw new Error("annotate_image job is missing image fields");
+    }
     await processAnnotate(job.data);
+  } else if (job.name === "embed_post") {
+    if (isImageJob(job.data)) {
+      throw new Error("embed_post job is missing post fields");
+    }
+    await processEmbedPost(job.data);
   } else {
     throw new Error(`unknown job ${job.name}`);
   }
@@ -131,8 +211,8 @@ async function processJob(job: Job<ImageJobData, void, JobName>): Promise<void> 
   await markJobSucceeded(job.data.jobRowId);
 }
 
-export async function startWorker(): Promise<Worker<ImageJobData, void, JobName>> {
-  const worker = new Worker<ImageJobData, void, JobName>(
+export async function startWorker(): Promise<Worker<JobData, void, JobName>> {
+  const worker = new Worker<JobData, void, JobName>(
     QUEUE_NAME,
     processJob,
     { connection, concurrency: 1 },
@@ -152,7 +232,7 @@ export async function startWorker(): Promise<Worker<ImageJobData, void, JobName>
     console.error("worker error", error);
   });
 
-  console.log("worker listening for embed_image and annotate_image jobs");
+  console.log("worker listening for embed_image, annotate_image, and embed_post jobs");
   return worker;
 }
 

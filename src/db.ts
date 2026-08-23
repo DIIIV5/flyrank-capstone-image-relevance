@@ -29,8 +29,10 @@ export async function upsertImage(
   return id;
 }
 
+export type EmbeddingOwner = "image" | "post";
+
 export async function insertOrGetJob(
-  type: "embed_image" | "annotate_image",
+  type: "embed_image" | "annotate_image" | "embed_post",
   idempotencyKey: string,
 ): Promise<{ id: string; status: string }> {
   const upserted = await pool.query<{ id: string; status: string }>(
@@ -128,27 +130,29 @@ export async function saveImageAnnotation(
 }
 
 export async function upsertEmbedding(
-  imageId: string,
+  ownerType: EmbeddingOwner,
+  ownerId: string,
   vector: number[],
   model: string,
 ): Promise<void> {
   await pool.query(
     `INSERT INTO embeddings (owner_type, owner_id, vector, model)
-     VALUES ('image', $1, $2, $3)
+     VALUES ($1, $2, $3, $4)
      ON CONFLICT (owner_type, owner_id, model)
      DO UPDATE SET vector = EXCLUDED.vector`,
-    [imageId, vector, model],
+    [ownerType, ownerId, vector, model],
   );
 }
 
 export async function embeddingExists(
-  imageId: string,
+  ownerType: EmbeddingOwner,
+  ownerId: string,
   model: string,
 ): Promise<boolean> {
   const result = await pool.query(
     `SELECT 1 FROM embeddings
-     WHERE owner_type = 'image' AND owner_id = $1 AND model = $2`,
-    [imageId, model],
+     WHERE owner_type = $1 AND owner_id = $2 AND model = $3`,
+    [ownerType, ownerId, model],
   );
   return (result.rowCount ?? 0) > 0;
 }
@@ -191,4 +195,244 @@ export async function recordUsage(input: {
       input.runtimeMs,
     ],
   );
+}
+
+export type PostRow = {
+  id: string;
+  title: string;
+  body: string;
+  expected_label: string | null;
+};
+
+export type ImageCandidate = {
+  id: string;
+  filename: string;
+  label: string | null;
+  labelScore: number | null;
+  runnerUpScore: number | null;
+  status: string;
+  subject: string | null;
+  caption: string | null;
+  vector: number[];
+};
+
+export type SuggestionWrite = {
+  imageId: string | null;
+  rank: number | null;
+  similarity: number | null;
+  decision: "suggested" | "rejected" | "no_confident_match";
+  reason: string;
+};
+
+function asNumberArray(value: unknown): number[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.map((entry) => Number(entry));
+}
+
+function mapCandidate(row: {
+  id: string;
+  filename: string;
+  label: string | null;
+  label_score: number | null;
+  runner_up_score: number | null;
+  status: string;
+  subject: string | null;
+  caption: string | null;
+  vector: unknown;
+}): ImageCandidate {
+  return {
+    id: row.id,
+    filename: row.filename,
+    label: row.label,
+    labelScore: row.label_score,
+    runnerUpScore: row.runner_up_score,
+    status: row.status,
+    subject: row.subject,
+    caption: row.caption,
+    vector: asNumberArray(row.vector),
+  };
+}
+
+export async function upsertPost(
+  title: string,
+  body: string,
+  expectedLabel: string | null,
+): Promise<string> {
+  const existing = await pool.query<{ id: string }>(
+    `SELECT id FROM posts WHERE title = $1`,
+    [title],
+  );
+  const id = existing.rows[0]?.id;
+  if (id) {
+    await pool.query(
+      `UPDATE posts
+       SET body = $2, expected_label = $3, updated_at = now()
+       WHERE id = $1`,
+      [id, body, expectedLabel],
+    );
+    return id;
+  }
+
+  const inserted = await pool.query<{ id: string }>(
+    `INSERT INTO posts (title, body, expected_label)
+     VALUES ($1, $2, $3)
+     RETURNING id`,
+    [title, body, expectedLabel],
+  );
+  const created = inserted.rows[0]?.id;
+  if (!created) {
+    throw new Error(`failed to insert post ${title}`);
+  }
+  return created;
+}
+
+export async function getPost(id: string): Promise<PostRow | null> {
+  const result = await pool.query<PostRow>(
+    `SELECT id, title, body, expected_label FROM posts WHERE id = $1`,
+    [id],
+  );
+  return result.rows[0] ?? null;
+}
+
+export async function getPostByTitleOrId(query: string): Promise<PostRow | null> {
+  const byId = await pool.query<PostRow>(
+    `SELECT id, title, body, expected_label FROM posts WHERE id::text = $1`,
+    [query],
+  );
+  if (byId.rows[0]) {
+    return byId.rows[0];
+  }
+
+  const byTitle = await pool.query<PostRow>(
+    `SELECT id, title, body, expected_label FROM posts WHERE lower(title) = lower($1)`,
+    [query],
+  );
+  if (byTitle.rows[0]) {
+    return byTitle.rows[0];
+  }
+
+  const needle = query.replace(/-/g, " ").toLowerCase();
+  const bySlug = await pool.query<PostRow>(
+    `SELECT id, title, body, expected_label
+     FROM posts
+     WHERE lower(title) LIKE $1
+     ORDER BY title
+     LIMIT 1`,
+    [`%${needle}%`],
+  );
+  return bySlug.rows[0] ?? null;
+}
+
+export async function getEmbedding(
+  ownerType: EmbeddingOwner,
+  ownerId: string,
+  model: string,
+): Promise<number[] | null> {
+  const result = await pool.query<{ vector: unknown }>(
+    `SELECT vector FROM embeddings
+     WHERE owner_type = $1 AND owner_id = $2 AND model = $3`,
+    [ownerType, ownerId, model],
+  );
+  const row = result.rows[0];
+  if (!row) {
+    return null;
+  }
+  return asNumberArray(row.vector);
+}
+
+export async function sampleEmbeddingLength(model: string): Promise<number | null> {
+  const result = await pool.query<{ vector: unknown }>(
+    `SELECT vector FROM embeddings WHERE model = $1 LIMIT 1`,
+    [model],
+  );
+  const row = result.rows[0];
+  if (!row) {
+    return null;
+  }
+  return asNumberArray(row.vector).length;
+}
+
+export async function listImageCandidates(model: string): Promise<ImageCandidate[]> {
+  const result = await pool.query<{
+    id: string;
+    filename: string;
+    label: string | null;
+    label_score: number | null;
+    runner_up_score: number | null;
+    status: string;
+    subject: string | null;
+    caption: string | null;
+    vector: unknown;
+  }>(
+    `SELECT i.id, i.filename, i.label, i.label_score, i.runner_up_score,
+            i.status, i.subject, i.caption, e.vector
+     FROM images i
+     JOIN embeddings e
+       ON e.owner_type = 'image' AND e.owner_id = i.id AND e.model = $1
+     ORDER BY i.filename`,
+    [model],
+  );
+  return result.rows.map(mapCandidate);
+}
+
+export async function getImageByFilename(
+  filename: string,
+  model: string,
+): Promise<ImageCandidate | null> {
+  const result = await pool.query<{
+    id: string;
+    filename: string;
+    label: string | null;
+    label_score: number | null;
+    runner_up_score: number | null;
+    status: string;
+    subject: string | null;
+    caption: string | null;
+    vector: unknown;
+  }>(
+    `SELECT i.id, i.filename, i.label, i.label_score, i.runner_up_score,
+            i.status, i.subject, i.caption, e.vector
+     FROM images i
+     JOIN embeddings e
+       ON e.owner_type = 'image' AND e.owner_id = i.id AND e.model = $1
+     WHERE i.filename = $2`,
+    [model, filename],
+  );
+  const row = result.rows[0];
+  return row ? mapCandidate(row) : null;
+}
+
+export async function replaceSuggestions(
+  postId: string,
+  rows: SuggestionWrite[],
+): Promise<void> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(`DELETE FROM suggestions WHERE post_id = $1`, [postId]);
+    for (const row of rows) {
+      await client.query(
+        `INSERT INTO suggestions
+           (post_id, image_id, rank, similarity, decision, reason, review)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [
+          postId,
+          row.imageId,
+          row.rank,
+          row.similarity,
+          row.decision,
+          row.reason,
+          row.decision === "suggested" ? "pending" : null,
+        ],
+      );
+    }
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 }

@@ -135,5 +135,8 @@ dist
 .yarn/install-state.gz
 .pnp.*
 
-# Data
-data/
+# Data (photos stay out of git; seed articles are committed)
+data/*
+!data/posts/
+!data/posts/**
+
