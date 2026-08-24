@@ -179,6 +179,4 @@ There is no `npm run eval` and no precision figure in the README. Ranking accura
 
 `GET /posts/:id/images`, `GET /suggestions/:id`, and `POST /suggestions/:id/review` are not implemented. Express is not installed. Ranking and the guard run from `npm run match`. `suggestions.review` stays `pending`.
 
-Guard check 5 compares Gemini `subject` to the Jina `label` when `subject` contains a word from `IMAGE_LABELS`. `kitten`, `tiger`, and `border collie` do not contain one, so those three skip the check. Check 2 is off because every image is `flagged`.
-
-[README.md](README.md), `.env.example`, and this file exist. `capstone.yaml` and `BUILDLOG.md` do not.
+Guard check 5 compares Gemini `subject` to the Jina `label` when `subject` contains a word from `IMAGE_LABELS`. `kitten` and `border collie` do not contain one, so those two skip the check. Check 2 is off because every image is `flagged`.

@@ -77,7 +77,7 @@ test("Gemini red fox against Jina wolf rejects on metadata disagreement", () => 
   assert.match(result.reason, /metadata disagreement/);
 });
 
-test("subjectAgreesWithLabel matches a longer label first", () => {
-  assert.equal(subjectAgreesWithLabel("a big cat in grass", "big cat"), "agree");
-  assert.equal(subjectAgreesWithLabel("a big cat in grass", "cat"), "disagree");
+test("subjectAgreesWithLabel treats tiger as its own label", () => {
+  assert.equal(subjectAgreesWithLabel("a tiger in grass", "tiger"), "agree");
+  assert.equal(subjectAgreesWithLabel("a tiger in grass", "cat"), "disagree");
 });

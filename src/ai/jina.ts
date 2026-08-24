@@ -66,9 +66,6 @@ function promptFor(label: ImageLabelName): string {
   if (label === "other") {
     return "a photo of an animal";
   }
-  if (label === "big cat") {
-    return "a photo of a lion or tiger or leopard";
-  }
   return `a photo of a ${label}`;
 }
 

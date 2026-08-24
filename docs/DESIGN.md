@@ -21,7 +21,7 @@ Jina CLIP v2 encodes each image and each post into a vector. The post title and 
 
 ## Labels
 
-Each image is classified into one of: `fox`, `wolf`, `dog`, `cat`, `big cat`, `bear`, `deer`, `other`.
+Each image is classified into one of: `fox`, `wolf`, `dog`, `cat`, `tiger`, `bear`, `deer`, `other`.
 
 ```json
 {

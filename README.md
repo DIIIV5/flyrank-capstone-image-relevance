@@ -25,7 +25,7 @@ Phases 1–3 are in the repo (schema, jobs, ingest/annotate, matching). Review A
 5. If no candidate is suggested, the script writes `no_confident_match` with reasons.
 6. Later: the user can approve or reject a suggestion. Suggestions include the stored alt text.
 
-## Architecture
+## Architecture 
 
 ```text
 Images ──► BullMQ worker ──► Jina CLIP v2 ──► labels + image vectors ──► Postgres
@@ -88,11 +88,11 @@ Eval: not implemented yet.
 
 ## Limitations
 
-- Labels are a closed set (`fox`, `wolf`, `dog`, `cat`, `big cat`, `bear`, `deer`, `other`). A bison should be classified as `other` or `flagged`.
+- Labels are a closed set (`fox`, `wolf`, `dog`, `cat`, `tiger`, `bear`, `deer`, `other`). A bison should be classified as `other` or `flagged`.
 - Zero-shot scores are not calibrated probabilities. Ingest marked every photo `flagged` (`0.70` / `0.15` in [src/labels.ts](src/labels.ts)), so guard check 2 is off.
 - The cosine floor of `0.25` was picked to match the scale of image-to-text CLIP scores. It is not measured.
 - Gemini `confidence` does not set `images.status` and does not affect rank.
 
 ## License
 
-`MIT`
+`MIT` 

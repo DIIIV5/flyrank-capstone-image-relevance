@@ -5,7 +5,7 @@ export const IMAGE_LABELS = [
   "wolf",
   "dog",
   "cat",
-  "big cat",
+  "tiger",
   "bear",
   "deer",
   "other",
