@@ -1,11 +1,10 @@
+import { catchAll, checkFlagged, cosineMin, labels } from "./app-config.js";
 import { labelMarginMin, labelScoreMin } from "./labels.js";
-import { IMAGE_LABELS } from "./types.js";
 
-/** Starting image-to-text CLIP floor. Not measured; Phase 4's labeled set replaces it. */
-export const cosineMin = 0.25;
+export { cosineMin };
 
-/** Ingest marked every photo flagged, so this check stays off until those numbers are retuned. */
-export const guardCheckFlagged = false;
+/** Guard check 2. Value comes from config.yaml check_flagged. */
+export const guardCheckFlagged = checkFlagged;
 
 /** Annotate hit the Gemini quota, so most rows have no subject. */
 export const guardRequireGeminiTags = false;
@@ -28,7 +27,7 @@ export type GuardInput = {
   image: GuardImage;
 };
 
-const labelsLongestFirst = [...IMAGE_LABELS].sort((a, b) => b.length - a.length);
+const labelsLongestFirst = [...labels].sort((a, b) => b.length - a.length);
 
 export function subjectAgreesWithLabel(
   subject: string,
@@ -36,7 +35,7 @@ export function subjectAgreesWithLabel(
 ): "agree" | "disagree" | "skip" {
   const text = subject.toLowerCase();
   const found = labelsLongestFirst.find((name) => {
-    if (name === "other") {
+    if (catchAll && name === catchAll) {
       return false;
     }
     return text.includes(name);
@@ -66,8 +65,8 @@ export function guard(input: GuardInput): {
   }
 
   // 2. Flagged image or a weak Jina score/margin.
-  const checkFlagged = input.checkFlagged ?? guardCheckFlagged;
-  if (checkFlagged) {
+  const check = input.checkFlagged ?? guardCheckFlagged;
+  if (check) {
     const score = image.labelScore ?? 0;
     const margin = (image.labelScore ?? 0) - (image.runnerUpScore ?? 0);
     if (image.status === "flagged" || score < labelScoreMin || margin < labelMarginMin) {

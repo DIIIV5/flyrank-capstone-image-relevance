@@ -1,0 +1,39 @@
+# Closed-set labels, folder paths, and score thresholds.
+# Secrets stay in .env. Restart the worker after you change this file.
+# If you change labels or score_scale, run: npm run reset-embed-images && npm run ingest
+
+labels: [fox, wolf, dog, cat, tiger, bear, deer, cow, chicken, other]
+catch_all: other
+
+# raw = store the image-text CLIP dot. softmax = store softmax of those dots.
+score_scale: raw
+softmax_temperature: 1
+
+# Flag rule: processed when score >= label_score_min and (score - runner_up) >= label_margin_min.
+label_score_min: 0.25
+label_margin_min: 0.01
+
+# Guard: refuse a pair when cosine is below this floor.
+cosine_min: 0.25
+check_flagged: true
+
+# Optional. Default prompt is "a photo of a {label}".
+# catch_all uses "a photo of an animal" unless you set a prompt here.
+# label_prompts:
+#   fox: a photo of a red fox
+
+paths:
+  corpus: data/images
+  posts: data/posts
+  matching_gold: data/eval/labels.json
+  label_eval:
+    fox: data/images/eval/fox
+    wolf: data/images/eval/wolf
+    dog: data/images/eval/dog
+    cat: data/images/eval/cat
+    tiger: data/images/eval/tiger
+    bear: data/images/eval/bear
+    deer: data/images/eval/deer
+    cow: data/images/eval/cow
+    chicken: data/images/eval/chicken
+    other: data/images/eval/other

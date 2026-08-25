@@ -1,5 +1,6 @@
 import pg from "pg";
 import { databaseUrl } from "./config.js";
+import type { SuggestionWrite } from "./rank-result.js";
 import type { ImageAnnotation, ImageLabel } from "./types.js";
 
 export const pool = new pg.Pool({ connectionString: databaseUrl });
@@ -157,6 +158,19 @@ export async function embeddingExists(
   return (result.rowCount ?? 0) > 0;
 }
 
+export async function resetImageEmbeddings(): Promise<{ embeddings: number; jobs: number }> {
+  const deleted = await pool.query(`DELETE FROM embeddings WHERE owner_type = 'image'`);
+  const updated = await pool.query(
+    `UPDATE jobs
+     SET status = 'queued', error = NULL, attempts = 0, updated_at = now()
+     WHERE type = 'embed_image'`,
+  );
+  return {
+    embeddings: deleted.rowCount ?? 0,
+    jobs: updated.rowCount ?? 0,
+  };
+}
+
 export async function listImagesMissingAnnotation(): Promise<
   { id: string; filename: string; content_hash: string }[]
 > {
@@ -216,13 +230,7 @@ export type ImageCandidate = {
   vector: number[];
 };
 
-export type SuggestionWrite = {
-  imageId: string | null;
-  rank: number | null;
-  similarity: number | null;
-  decision: "suggested" | "rejected" | "no_confident_match";
-  reason: string;
-};
+export type { SuggestionWrite } from "./rank-result.js";
 
 function asNumberArray(value: unknown): number[] {
   if (!Array.isArray(value)) {
@@ -435,4 +443,110 @@ export async function replaceSuggestions(
   } finally {
     client.release();
   }
+}
+
+export type SuggestionRow = {
+  id: string;
+  postId: string;
+  imageId: string | null;
+  filename: string | null;
+  caption: string | null;
+  label: string | null;
+  labelScore: number | null;
+  runnerUpScore: number | null;
+  rank: number | null;
+  similarity: number | null;
+  decision: string;
+  reason: string;
+  review: string | null;
+  reviewedAt: Date | null;
+};
+
+function mapSuggestion(row: {
+  id: string;
+  post_id: string;
+  image_id: string | null;
+  filename: string | null;
+  caption: string | null;
+  label: string | null;
+  label_score: number | null;
+  runner_up_score: number | null;
+  rank: number | null;
+  similarity: number | null;
+  decision: string;
+  reason: string;
+  review: string | null;
+  reviewed_at: Date | null;
+}): SuggestionRow {
+  return {
+    id: row.id,
+    postId: row.post_id,
+    imageId: row.image_id,
+    filename: row.filename,
+    caption: row.caption,
+    label: row.label,
+    labelScore: row.label_score,
+    runnerUpScore: row.runner_up_score,
+    rank: row.rank,
+    similarity: row.similarity,
+    decision: row.decision,
+    reason: row.reason,
+    review: row.review,
+    reviewedAt: row.reviewed_at,
+  };
+}
+
+const suggestionSelect = `
+  SELECT s.id, s.post_id, s.image_id, i.filename, i.caption, i.label,
+         i.label_score, i.runner_up_score, s.rank, s.similarity,
+         s.decision, s.reason, s.review, s.reviewed_at
+  FROM suggestions s
+  LEFT JOIN images i ON i.id = s.image_id
+`;
+
+export async function getSuggestionById(id: string): Promise<SuggestionRow | null> {
+  try {
+    const result = await pool.query(`${suggestionSelect} WHERE s.id = $1`, [id]);
+    const row = result.rows[0];
+    return row ? mapSuggestion(row) : null;
+  } catch (error) {
+    if (isInvalidUuid(error)) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+export async function setSuggestionReview(
+  id: string,
+  review: "approved" | "rejected",
+): Promise<SuggestionRow | null> {
+  try {
+    const updated = await pool.query<{ id: string }>(
+      `UPDATE suggestions
+       SET review = $2, reviewed_at = now()
+       WHERE id = $1
+       RETURNING id`,
+      [id, review],
+    );
+    const suggestionId = updated.rows[0]?.id;
+    if (!suggestionId) {
+      return null;
+    }
+    return getSuggestionById(suggestionId);
+  } catch (error) {
+    if (isInvalidUuid(error)) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+function isInvalidUuid(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "22P02"
+  );
 }

@@ -10,6 +10,11 @@
     "worker": "tsx src/scripts/worker.ts",
     "seed-posts": "tsx src/scripts/seed-posts.ts",
     "match": "tsx src/scripts/match.ts",
+    "serve": "tsx src/scripts/serve.ts",
+    "start": "tsx src/scripts/serve.ts",
+    "eval": "tsx src/scripts/eval.ts",
+    "eval-labels": "tsx src/scripts/eval-labels.ts",
+    "reset-embed-images": "tsx src/scripts/reset-embed-images.ts",
     "test": "tsx --test src/*.test.ts"
   },
   "repository": {
@@ -25,6 +30,7 @@
   },
   "homepage": "https://github.com/DIIIV5/flyrank-capstone-image-relevance#readme",
   "devDependencies": {
+    "@types/express": "^5.0.6",
     "@types/node": "^26.2.0",
     "@types/pg": "^8.23.1",
     "tsx": "^4.23.12",
@@ -35,8 +41,10 @@
     "@huggingface/transformers": "^4.2.0",
     "bullmq": "^6.1.2",
     "dotenv": "^17.4.2",
+    "express": "^5.2.1",
     "ioredis": "^6.0.0",
     "pg": "^8.23.0",
+    "yaml": "^2.9.0",
     "zod": "^4.4.3"
   }
 }

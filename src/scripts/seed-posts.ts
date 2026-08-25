@@ -1,14 +1,14 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { labels } from "../app-config.js";
 import { postsDir } from "../config.js";
 import { insertOrGetJob, pool, upsertPost } from "../db.js";
 import { closeQueue, enqueuePostJob } from "../jobs.js";
-import { IMAGE_LABELS, type ImageLabelName } from "../types.js";
 
 type ParsedPost = {
   filename: string;
   title: string;
-  expectedLabel: ImageLabelName | null;
+  expectedLabel: string | null;
   body: string;
 };
 
@@ -37,12 +37,12 @@ function parseFrontMatter(raw: string, filename: string): ParsedPost {
   }
 
   const rawLabel = fields.expected_label ?? "";
-  let expectedLabel: ImageLabelName | null = null;
+  let expectedLabel: string | null = null;
   if (rawLabel.length > 0) {
-    if (!(IMAGE_LABELS as readonly string[]).includes(rawLabel)) {
+    if (!labels.includes(rawLabel)) {
       throw new Error(`${filename} has unknown expected_label ${rawLabel}`);
     }
-    expectedLabel = rawLabel as ImageLabelName;
+    expectedLabel = rawLabel;
   }
 
   return { filename, title, expectedLabel, body };

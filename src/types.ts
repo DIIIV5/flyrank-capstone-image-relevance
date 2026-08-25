@@ -1,20 +1,10 @@
 import { z } from "zod";
-
-export const IMAGE_LABELS = [
-  "fox",
-  "wolf",
-  "dog",
-  "cat",
-  "tiger",
-  "bear",
-  "deer",
-  "other",
-] as const;
+import { isConfiguredLabel } from "./app-config.js";
 
 export const ImageLabelSchema = z.object({
-  label: z.enum(IMAGE_LABELS),
+  label: z.string().refine(isConfiguredLabel, { message: "unknown label" }),
   score: z.number().min(0).max(1),
-  runnerUpLabel: z.enum(IMAGE_LABELS),
+  runnerUpLabel: z.string().refine(isConfiguredLabel, { message: "unknown label" }),
   runnerUpScore: z.number().min(0).max(1),
 });
 
@@ -28,4 +18,4 @@ export const ImageAnnotationSchema = z.object({
 
 export type ImageLabel = z.infer<typeof ImageLabelSchema>;
 export type ImageAnnotation = z.infer<typeof ImageAnnotationSchema>;
-export type ImageLabelName = (typeof IMAGE_LABELS)[number];
+export type ImageLabelName = string;

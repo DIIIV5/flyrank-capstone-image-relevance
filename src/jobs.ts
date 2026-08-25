@@ -59,10 +59,18 @@ export async function enqueueImageJob(
   name: ImageJobName,
   data: ImageJobData,
 ): Promise<void> {
+  const jobId = `${name}-${data.contentHash}`;
+  const existing = await imageQueue.getJob(jobId);
+  if (existing) {
+    const state = await existing.getState();
+    if (state === "completed" || state === "failed") {
+      await existing.remove();
+    }
+  }
   try {
     await imageQueue.add(name, data, {
       ...jobOpts,
-      jobId: `${name}-${data.contentHash}`,
+      jobId,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -73,11 +81,18 @@ export async function enqueueImageJob(
 }
 
 export async function enqueuePostJob(data: PostJobData): Promise<void> {
+  const jobId = `embed_post-${data.postId}`;
+  const existing = await imageQueue.getJob(jobId);
+  if (existing) {
+    const state = await existing.getState();
+    if (state === "completed" || state === "failed") {
+      await existing.remove();
+    }
+  }
   try {
     await imageQueue.add("embed_post", data, {
       ...jobOpts,
-      // BullMQ custom job ids cannot contain ":".
-      jobId: `embed_post-${data.postId}`,
+      jobId,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -239,4 +254,24 @@ export async function startWorker(): Promise<Worker<JobData, void, JobName>> {
 export async function closeQueue(): Promise<void> {
   await imageQueue.close();
   await connection.quit();
+}
+
+export async function removeEmbedImageJobs(): Promise<number> {
+  const jobs = await imageQueue.getJobs([
+    "completed",
+    "failed",
+    "wait",
+    "waiting",
+    "delayed",
+    "paused",
+  ]);
+  let removed = 0;
+  for (const job of jobs) {
+    const id = String(job.id ?? "");
+    if (job.name === "embed_image" || id.startsWith("embed_image-")) {
+      await job.remove();
+      removed += 1;
+    }
+  }
+  return removed;
 }

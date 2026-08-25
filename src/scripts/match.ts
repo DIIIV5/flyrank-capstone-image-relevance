@@ -1,20 +1,10 @@
-import { embedModel } from "../config.js";
 import {
-  getEmbedding,
-  getImageByFilename,
   getPostByTitleOrId,
-  listImageCandidates,
   pool,
   replaceSuggestions,
-  type ImageCandidate,
-  type SuggestionWrite,
 } from "../db.js";
-import {
-  cosineMin as defaultCosineMin,
-  guard,
-  guardRequireGeminiTags,
-} from "../guard.js";
-import { cosine, rankByCosine } from "../similarity.js";
+import { cosineMin as defaultCosineMin, guardRequireGeminiTags } from "../guard.js";
+import { rankForPost, RankError, toSuggestionWrites } from "../rank.js";
 
 type Args = {
   post: string;
@@ -85,31 +75,14 @@ function printRow(
   rank: number | null,
   filename: string,
   label: string | null,
-  similarity: number,
+  similarity: number | null,
   decision: string,
   reason: string,
 ): void {
   const rankText = rank === null ? "-" : String(rank);
   const labelText = label ?? "none";
-  console.log(
-    `${rankText} / ${filename} / ${labelText} / ${similarity.toFixed(3)} / ${decision} / ${reason}`,
-  );
-}
-
-function toSuggestion(
-  image: ImageCandidate | null,
-  rank: number | null,
-  similarity: number | null,
-  decision: SuggestionWrite["decision"],
-  reason: string,
-): SuggestionWrite {
-  return {
-    imageId: image?.id ?? null,
-    rank,
-    similarity,
-    decision,
-    reason,
-  };
+  const simText = similarity === null ? "-" : similarity.toFixed(3);
+  console.log(`${rankText} / ${filename} / ${labelText} / ${simText} / ${decision} / ${reason}`);
 }
 
 const args = parseArgs(process.argv.slice(2));
@@ -126,68 +99,29 @@ if (!post) {
   process.exit(1);
 }
 
-const postVector = await getEmbedding("post", post.id, embedModel);
-if (!postVector) {
-  console.error(`post has no embedding: ${post.title}`);
-  await pool.end();
-  process.exit(1);
-}
+try {
+  const result = await rankForPost(post, {
+    image: args.image,
+    cosineMin: args.cosineMin,
+    requireTags: args.requireTags,
+  });
 
-console.log(`post ${post.id} / ${post.title}`);
+  console.log(`post ${result.post.id} / ${result.post.title}`);
+  for (const row of result.candidates) {
+    printRow(row.rank, row.filename, row.label, row.similarity, row.decision, row.reason);
+  }
+  if (!args.image && result.no_confident_match) {
+    printRow(null, "none", null, null, "no_confident_match", result.no_confident_match.reason);
+  }
 
-const writes: SuggestionWrite[] = [];
-
-if (args.image) {
-  const image = await getImageByFilename(args.image, embedModel);
-  if (!image) {
-    console.error(`image not found: ${args.image}`);
+  await replaceSuggestions(post.id, toSuggestionWrites(result, args.image === null));
+} catch (error) {
+  if (error instanceof RankError) {
+    console.error(error.message);
     await pool.end();
     process.exit(1);
   }
-
-  const similarity = cosine(postVector, image.vector);
-  const result = guard({
-    expectedLabel: post.expected_label,
-    similarity,
-    cosineMin: args.cosineMin,
-    requireGeminiTags: args.requireTags,
-    image,
-  });
-  printRow(1, image.filename, image.label, similarity, result.decision, result.reason);
-  writes.push(toSuggestion(image, 1, similarity, result.decision, result.reason));
-} else {
-  const candidates = await listImageCandidates(embedModel);
-  const ranked = rankByCosine(postVector, candidates).slice(0, 3);
-  for (const candidate of ranked) {
-    const result = guard({
-      expectedLabel: post.expected_label,
-      similarity: candidate.similarity,
-      cosineMin: args.cosineMin,
-      requireGeminiTags: args.requireTags,
-      image: candidate,
-    });
-    printRow(
-      candidate.rank,
-      candidate.filename,
-      candidate.label,
-      candidate.similarity,
-      result.decision,
-      result.reason,
-    );
-    writes.push(
-      toSuggestion(candidate, candidate.rank, candidate.similarity, result.decision, result.reason),
-    );
-  }
-
-  if (!writes.some((row) => row.decision === "suggested")) {
-    const reasons = writes.map((row) => row.reason).join("; ");
-    const reason = reasons
-      ? `no confident match: ${reasons}`
-      : "no confident match: no image embeddings";
-    console.log(`- / none / none / - / no_confident_match / ${reason}`);
-    writes.push(toSuggestion(null, null, null, "no_confident_match", reason));
-  }
+  throw error;
 }
 
-await replaceSuggestions(post.id, writes);
 await pool.end();

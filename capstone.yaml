@@ -1,0 +1,15 @@
+# Submission pack for the image–content matching capstone.
+
+# Ingest and annotate must already have been run (Jina + Gemini jobs).
+# seed-posts inserts data/posts/*.md and enqueues embed_post.
+
+run: npm run serve
+seed: npm run seed-posts
+test: npm test
+base_url: http://localhost:3000
+
+routes:
+  - GET /posts/:id/images
+  - POST /posts/:id/images
+  - GET /suggestions/:id
+  - POST /suggestions/:id/review

@@ -135,8 +135,11 @@ dist
 .yarn/install-state.gz
 .pnp.*
 
-# Data (photos stay out of git; seed articles are committed)
+# Data (photos stay out of git; seed articles and matching gold are committed)
 data/*
 !data/posts/
 !data/posts/**
+!data/eval/
+!data/eval/**
+data/eval/label-sweep.json
 
