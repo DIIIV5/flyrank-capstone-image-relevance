@@ -4,7 +4,9 @@
 
 This software picks a photo for an article when the match is clear, and refuses it when the match is not. A fox article gets a fox photo, a wolf photo for that article is refused, and an article about coral is refused outright when no photo fits.
 
-How the system is built: [docs/DESIGN.md](docs/DESIGN.md).
+## Architecture
+
+How the system is built, see here: [docs/DESIGN.md](docs/DESIGN.md).
 
 ## What you need
 
