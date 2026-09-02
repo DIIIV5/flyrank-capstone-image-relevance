@@ -6,7 +6,7 @@ console.log("loading Jina CLIP v2 (first run downloads weights)...");
 await loadJina();
 console.log("Jina CLIP v2 ready");
 
-const worker = await startWorker();
+const worker = startWorker();
 
 async function shutdown(): Promise<void> {
   await worker.close();
@@ -14,9 +14,5 @@ async function shutdown(): Promise<void> {
   process.exit(0);
 }
 
-process.on("SIGINT", () => {
-  void shutdown();
-});
-process.on("SIGTERM", () => {
-  void shutdown();
-});
+process.on("SIGINT", () => void shutdown());
+process.on("SIGTERM", () => void shutdown());

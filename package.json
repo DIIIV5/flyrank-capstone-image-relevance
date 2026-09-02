@@ -1,40 +1,27 @@
 {
   "name": "flyrank-capstone-image-relevance",
   "version": "1.0.0",
-  "description": "FlyRank capstone project",
-  "main": "index.js",
-  "scripts": {
-    "migrate": "tsx src/scripts/migrate.ts",
-    "ingest": "tsx src/scripts/ingest.ts",
-    "annotate": "tsx src/scripts/annotate.ts",
-    "worker": "tsx src/scripts/worker.ts",
-    "seed-posts": "tsx src/scripts/seed-posts.ts",
-    "match": "tsx src/scripts/match.ts",
-    "serve": "tsx src/scripts/serve.ts",
-    "start": "tsx src/scripts/serve.ts",
-    "eval": "tsx src/scripts/eval.ts",
-    "eval-labels": "tsx src/scripts/eval-labels.ts",
-    "reset-embed-images": "tsx src/scripts/reset-embed-images.ts",
-    "test": "tsx --test src/*.test.ts"
-  },
+  "description": "Picks a library photo for an article when the match is clear, and refuses it when it is not.",
+  "type": "module",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/DIIIV5/flyrank-capstone-image-relevance.git"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "module",
-  "bugs": {
-    "url": "https://github.com/DIIIV5/flyrank-capstone-image-relevance/issues"
-  },
-  "homepage": "https://github.com/DIIIV5/flyrank-capstone-image-relevance#readme",
-  "devDependencies": {
-    "@types/express": "^5.0.6",
-    "@types/node": "^26.2.0",
-    "@types/pg": "^8.23.1",
-    "tsx": "^4.23.12",
-    "typescript": "^7.0.2"
+  "scripts": {
+    "migrate": "tsx src/scripts/migrate.ts",
+    "worker": "tsx src/scripts/worker.ts",
+    "ingest": "tsx src/scripts/ingest.ts",
+    "annotate": "tsx src/scripts/annotate.ts",
+    "seed-posts": "tsx src/scripts/seed-posts.ts",
+    "match": "tsx src/scripts/match.ts",
+    "serve": "tsx src/scripts/serve.ts",
+    "eval": "tsx src/scripts/eval.ts",
+    "eval-labels": "tsx src/scripts/eval-labels.ts",
+    "reset-embed-images": "tsx src/scripts/reset-embed-images.ts",
+    "test": "tsx --test src/*.test.ts",
+    "test:coverage": "node --import tsx --test --experimental-test-coverage src/*.test.ts",
+    "typecheck": "tsc -p ."
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
@@ -46,5 +33,12 @@
     "pg": "^8.23.0",
     "yaml": "^2.9.0",
     "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.2.0",
+    "@types/pg": "^8.23.1",
+    "tsx": "^4.23.12",
+    "typescript": "^7.0.2"
   }
 }

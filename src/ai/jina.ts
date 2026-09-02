@@ -1,193 +1,110 @@
 import path from "node:path";
 import { AutoModel, AutoProcessor, RawImage, env } from "@huggingface/transformers";
 import {
-  embedModel,
   imagesDir,
   labels,
   projectRoot,
   promptForLabel,
   scoreScale,
   softmaxTemperature,
-} from "../config.js";
-import { softmax } from "../labels.js";
-import { ImageLabelSchema, type ImageLabel } from "../types.js";
+} from "../app-config.js";
+import { embedModel } from "../config.js";
+import { pickLabels, type LabelScore } from "../labels.js";
+import type { ImageLabel } from "../types.js";
 
 env.cacheDir = path.join(projectRoot, ".cache");
 
-type JinaBundle = {
+type Jina = {
   processor: Awaited<ReturnType<typeof AutoProcessor.from_pretrained>>;
   model: Awaited<ReturnType<typeof AutoModel.from_pretrained>>;
 };
 
-let loaded: JinaBundle | undefined;
+/** The parts of a Transformers.js tensor this module reads. The library types outputs as any. */
+type EmbeddingTensor = { dims: number[]; data: ArrayLike<number> };
 
-export type LabelScore = { name: string; raw: number };
+type ClipOutput = {
+  l2norm_image_embeddings: EmbeddingTensor;
+  l2norm_text_embeddings: EmbeddingTensor;
+};
 
-function rowsFromTensor(tensor: {
-  data: ArrayLike<number>;
-  dims: number[];
-  tolist?: () => unknown;
-} | undefined): number[][] {
-  if (!tensor) {
-    throw new Error("missing embedding tensor from Jina");
+let loaded: Jina | undefined;
+
+async function getJina(): Promise<Jina> {
+  if (!loaded) {
+    const [processor, model] = await Promise.all([
+      AutoProcessor.from_pretrained(embedModel),
+      AutoModel.from_pretrained(embedModel, { dtype: "q4" }),
+    ]);
+    loaded = { processor, model };
   }
-  if (typeof tensor.tolist === "function") {
-    const list = tensor.tolist();
-    if (Array.isArray(list) && Array.isArray(list[0])) {
-      return list as number[][];
-    }
-    if (Array.isArray(list) && typeof list[0] === "number") {
-      return [list as number[]];
-    }
-  }
+  return loaded;
+}
 
-  if (tensor.dims.length === 1) {
-    return [Array.from(tensor.data)];
-  }
+export async function loadJina(): Promise<void> {
+  await getJina();
+}
 
-  const rows = tensor.dims[0] ?? 1;
-  const cols = tensor.dims[1] ?? tensor.data.length;
+function tensorRows(tensor: EmbeddingTensor): number[][] {
   const data = Array.from(tensor.data);
-  const out: number[][] = [];
-  for (let r = 0; r < rows; r++) {
-    out.push(data.slice(r * cols, (r + 1) * cols));
+  const cols = tensor.dims.length === 1 ? data.length : (tensor.dims[1] ?? data.length);
+  const rows: number[][] = [];
+  for (let start = 0; start < data.length; start += cols) {
+    rows.push(data.slice(start, start + cols));
   }
-  return out;
+  return rows;
 }
 
 function dot(a: number[], b: number[]): number {
   let sum = 0;
-  const n = Math.min(a.length, b.length);
-  for (let i = 0; i < n; i++) {
+  for (let i = 0; i < Math.min(a.length, b.length); i++) {
     sum += (a[i] ?? 0) * (b[i] ?? 0);
   }
   return sum;
 }
 
-export async function loadJina(): Promise<void> {
-  await getModels();
+/** Encodes texts and images together; this processor build needs both. */
+async function encode(texts: string[], images: RawImage[]): Promise<ClipOutput> {
+  const jina = await getJina();
+  const inputs = await jina.processor(texts, images, { padding: true, truncation: true });
+  const output: ClipOutput = await jina.model(inputs);
+  return output;
 }
 
-async function getModels(): Promise<JinaBundle> {
-  if (loaded) {
-    return loaded;
-  }
-
-  const [processor, model] = await Promise.all([
-    AutoProcessor.from_pretrained(embedModel),
-    AutoModel.from_pretrained(embedModel, { dtype: "q4" }),
-  ]);
-
-  loaded = { processor, model };
-  return loaded;
-}
-
+/** Image vector plus the raw dot against every label prompt. */
 export async function scoreImagePath(
   absPath: string,
 ): Promise<{ vector: number[]; scored: LabelScore[] }> {
-  const jina = await getModels();
-  const image = await RawImage.read(absPath);
-  const prompts = labels.map(promptForLabel);
-  const inputs = await jina.processor(prompts, [image], {
-    padding: true,
-    truncation: true,
-  });
-  const output = await jina.model(inputs);
-  const imageRows = rowsFromTensor(output.l2norm_image_embeddings);
-  const textRows = rowsFromTensor(output.l2norm_text_embeddings);
-  const vector = imageRows[0];
+  const prompts = labels.map((label) => promptForLabel(label));
+  const output = await encode(prompts, [await RawImage.read(absPath)]);
+  const vector = tensorRows(output.l2norm_image_embeddings)[0];
   if (!vector) {
     throw new Error(`no image embedding for ${absPath}`);
   }
-
-  const scored = labels.map((name, index) => {
-    const textVec = textRows[index];
-    if (!textVec) {
-      throw new Error(`no text embedding for label ${name}`);
-    }
-    return { name, raw: dot(vector, textVec) };
-  });
-
+  const textRows = tensorRows(output.l2norm_text_embeddings);
+  if (textRows.length !== labels.length) {
+    throw new Error(`expected ${labels.length} label embeddings, got ${textRows.length}`);
+  }
+  const scored = labels.map((name, index) => ({
+    name,
+    raw: dot(vector, textRows[index] ?? []),
+  }));
   return { vector, scored };
-}
-
-export function labelsFromScores(
-  scored: LabelScore[],
-  temperature = 1,
-): ImageLabel {
-  const probs = softmax(
-    scored.map((entry) => entry.raw),
-    temperature,
-  );
-  const ranked = scored
-    .map((entry, index) => ({
-      name: entry.name,
-      score: probs[index] ?? 0,
-    }))
-    .sort((a, b) => b.score - a.score);
-
-  const top = ranked[0];
-  const second = ranked[1];
-  if (!top || !second) {
-    throw new Error("need at least two labels");
-  }
-
-  return ImageLabelSchema.parse({
-    label: top.name,
-    score: top.score,
-    runnerUpLabel: second.name,
-    runnerUpScore: second.score,
-  });
-}
-
-export function labelsFromRawDots(scored: LabelScore[]): ImageLabel {
-  const ranked = [...scored].sort((a, b) => b.raw - a.raw);
-  const top = ranked[0];
-  const second = ranked[1];
-  if (!top || !second) {
-    throw new Error("need at least two labels");
-  }
-
-  return ImageLabelSchema.parse({
-    label: top.name,
-    score: top.raw,
-    runnerUpLabel: second.name,
-    runnerUpScore: second.raw,
-  });
 }
 
 export async function embedAndLabel(
   filename: string,
 ): Promise<{ vector: number[]; labels: ImageLabel }> {
   const { vector, scored } = await scoreImagePath(path.join(imagesDir, filename));
-  const parsed =
-    scoreScale === "softmax"
-      ? labelsFromScores(scored, softmaxTemperature)
-      : labelsFromRawDots(scored);
-  return { vector, labels: parsed };
+  const temperature = scoreScale === "softmax" ? softmaxTemperature : null;
+  return { vector, labels: pickLabels(scored, temperature) };
 }
 
 export async function embedText(text: string): Promise<number[]> {
-  const jina = await getModels();
-  // This processor build expects text plus an image; a 1x1 placeholder is enough to take the text tower.
-  let lastError: unknown;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const placeholder = new RawImage(new Uint8Array([0, 0, 0]), 1, 1, 3);
-      const inputs = await jina.processor([text], [placeholder], {
-        padding: true,
-        truncation: true,
-      });
-      const output = await jina.model(inputs);
-      const textRows = rowsFromTensor(output.l2norm_text_embeddings);
-      const vector = textRows[0];
-      if (!vector) {
-        throw new Error("no text embedding");
-      }
-      return vector;
-    } catch (error) {
-      lastError = error;
-    }
+  const placeholder = new RawImage(new Uint8Array([0, 0, 0]), 1, 1, 3);
+  const output = await encode([text], [placeholder]);
+  const vector = tensorRows(output.l2norm_text_embeddings)[0];
+  if (!vector) {
+    throw new Error("no text embedding");
   }
-  throw lastError instanceof Error ? lastError : new Error("no text embedding");
+  return vector;
 }

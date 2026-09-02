@@ -1,5 +1,7 @@
 import { Queue, Worker, type Job } from "bullmq";
 import { Redis } from "ioredis";
+import { annotateImage } from "./ai/gemini.js";
+import { embedAndLabel, embedText } from "./ai/jina.js";
 import {
   embedModel,
   geminiImageCostUsd,
@@ -9,8 +11,9 @@ import {
   redisUrl,
 } from "./config.js";
 import {
-  embeddingExists,
+  getEmbedding,
   getPost,
+  insertOrGetJob,
   markJobFailed,
   markJobRunning,
   markJobSucceeded,
@@ -19,230 +22,156 @@ import {
   saveImageAnnotation,
   saveImageLabels,
   upsertEmbedding,
+  type UsageRecord,
 } from "./db.js";
-import { annotateImage } from "./ai/gemini.js";
-import { embedAndLabel, embedText } from "./ai/jina.js";
 import { labelStatus } from "./labels.js";
-import { ImageAnnotationSchema } from "./types.js";
 
-export type ImageJobName = "embed_image" | "annotate_image";
-export type JobName = ImageJobName | "embed_post";
+type ImageJob = { jobRowId: string; imageId: string; filename: string; contentHash: string };
 
-export type ImageJobData = {
-  jobRowId: string;
-  imageId: string;
-  filename: string;
-  contentHash: string;
-};
+export type JobData =
+  | ({ type: "embed_image" } & ImageJob)
+  | ({ type: "annotate_image" } & ImageJob)
+  | { type: "embed_post"; jobRowId: string; postId: string };
 
-export type PostJobData = {
-  jobRowId: string;
-  postId: string;
-};
-
-export type JobData = ImageJobData | PostJobData;
+/** A job before it has a row in the jobs table. */
+export type JobSpec = JobData extends infer T
+  ? T extends { jobRowId: string }
+    ? Omit<T, "jobRowId">
+    : never
+  : never;
 
 const QUEUE_NAME = "image-jobs";
 
 const connection = new Redis(redisUrl, { maxRetriesPerRequest: null });
 
-export const imageQueue = new Queue<JobData>(QUEUE_NAME, { connection });
+export const queue = new Queue<JobData>(QUEUE_NAME, { connection });
 
-const jobOpts = {
-  attempts: jobAttempts,
-  backoff: { type: "exponential" as const, delay: jobBackoffMs },
-  removeOnComplete: 50,
-  removeOnFail: 50,
-};
+/** One key per piece of work: the content hash for images, the post id for posts. */
+function idempotencyKey(spec: JobSpec): string {
+  const key = spec.type === "embed_post" ? spec.postId : spec.contentHash;
+  return `${spec.type}:${key}`;
+}
 
-export async function enqueueImageJob(
-  name: ImageJobName,
-  data: ImageJobData,
-): Promise<void> {
-  const jobId = `${name}-${data.contentHash}`;
-  const existing = await imageQueue.getJob(jobId);
+/**
+ * Creates or finds the jobs row and enqueues it unless it already succeeded
+ * or an identical job is still waiting. Returns true when a job was queued.
+ */
+export async function queueOnce(spec: JobSpec): Promise<boolean> {
+  const row = await insertOrGetJob(spec.type, idempotencyKey(spec));
+  if (row.status === "succeeded") {
+    return false;
+  }
+
+  // BullMQ custom ids cannot contain ":".
+  const jobId = idempotencyKey(spec).replace(":", "-");
+  const existing = await queue.getJob(jobId);
   if (existing) {
     const state = await existing.getState();
-    if (state === "completed" || state === "failed") {
-      await existing.remove();
+    if (state !== "completed" && state !== "failed") {
+      return false;
     }
+    await existing.remove();
   }
+
+  const data: JobData = { ...spec, jobRowId: row.id };
+  await queue.add(data.type, data, {
+    jobId,
+    attempts: jobAttempts,
+    backoff: { type: "exponential", delay: jobBackoffMs },
+    removeOnComplete: 50,
+    removeOnFail: 50,
+  });
+  return true;
+}
+
+const jinaUsage = {
+  kind: "local_embed",
+  provider: "transformers.js",
+  model: embedModel,
+  costUsd: 0,
+} as const;
+const geminiUsage = {
+  kind: "vision",
+  provider: "gemini",
+  model: geminiModel,
+  costUsd: geminiImageCostUsd,
+} as const;
+
+/** Records an ai_usage row whether or not the call succeeds. */
+async function withUsage<T>(
+  jobRowId: string,
+  usage: Omit<UsageRecord, "jobId" | "runtimeMs">,
+  run: () => Promise<T>,
+): Promise<T> {
+  const started = Date.now();
   try {
-    await imageQueue.add(name, data, {
-      ...jobOpts,
-      jobId,
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (!/already/i.test(message)) {
-      throw error;
-    }
+    return await run();
+  } finally {
+    await recordUsage({ ...usage, jobId: jobRowId, runtimeMs: Date.now() - started });
   }
 }
 
-export async function enqueuePostJob(data: PostJobData): Promise<void> {
-  const jobId = `embed_post-${data.postId}`;
-  const existing = await imageQueue.getJob(jobId);
-  if (existing) {
-    const state = await existing.getState();
-    if (state === "completed" || state === "failed") {
-      await existing.remove();
-    }
-  }
-  try {
-    await imageQueue.add("embed_post", data, {
-      ...jobOpts,
-      jobId,
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (!/already/i.test(message)) {
-      throw error;
-    }
-  }
-}
-
-function isImageJob(data: JobData): data is ImageJobData {
-  return "imageId" in data;
-}
-
-async function processEmbed(data: ImageJobData): Promise<void> {
-  if (await embeddingExists("image", data.imageId, embedModel)) {
+async function processEmbedImage(data: ImageJob): Promise<void> {
+  if (await getEmbedding("image", data.imageId, embedModel)) {
     return;
   }
-
-  const started = Date.now();
-  let vector: number[] | undefined;
-  let labels;
-  try {
-    ({ vector, labels } = await embedAndLabel(data.filename));
-  } finally {
-    await recordUsage({
-      jobId: data.jobRowId,
-      kind: "local_embed",
-      provider: "transformers.js",
-      model: embedModel,
-      units: 1,
-      costUsd: 0,
-      runtimeMs: Date.now() - started,
-    });
-  }
-
-  if (!vector || !labels) {
-    throw new Error(`embed produced no result for ${data.filename}`);
-  }
-
+  const { vector, labels } = await withUsage(data.jobRowId, jinaUsage, () =>
+    embedAndLabel(data.filename),
+  );
   await saveImageLabels(data.imageId, labels, labelStatus(labels));
   await upsertEmbedding("image", data.imageId, vector, embedModel);
 }
 
-async function processEmbedPost(data: PostJobData): Promise<void> {
-  if (await embeddingExists("post", data.postId, embedModel)) {
+async function processAnnotateImage(data: ImageJob): Promise<void> {
+  const annotation = await withUsage(data.jobRowId, geminiUsage, () =>
+    annotateImage(data.filename),
+  );
+  await saveImageAnnotation(data.imageId, annotation);
+}
+
+async function processEmbedPost(jobRowId: string, postId: string): Promise<void> {
+  if (await getEmbedding("post", postId, embedModel)) {
     return;
   }
-
-  const post = await getPost(data.postId);
+  const post = await getPost(postId);
   if (!post) {
-    throw new Error(`post ${data.postId} is missing`);
+    throw new Error(`post ${postId} is missing`);
   }
-
-  const started = Date.now();
-  let vector: number[] | undefined;
-  try {
-    vector = await embedText(`${post.title}\n\n${post.body}`);
-  } finally {
-    await recordUsage({
-      jobId: data.jobRowId,
-      kind: "local_embed",
-      provider: "transformers.js",
-      model: embedModel,
-      units: 1,
-      costUsd: 0,
-      runtimeMs: Date.now() - started,
-    });
-  }
-
-  if (!vector) {
-    throw new Error(`embed produced no result for post ${data.postId}`);
-  }
-
-  const expectedLength = await sampleEmbeddingLength(embedModel);
-  if (expectedLength !== null && vector.length !== expectedLength) {
-    throw new Error(
-      `post vector length ${vector.length} does not match image vector length ${expectedLength}`,
-    );
-  }
-
-  await upsertEmbedding("post", data.postId, vector, embedModel);
-}
-
-async function processAnnotate(data: ImageJobData): Promise<void> {
-  const started = Date.now();
-  let raw: unknown;
-  try {
-    raw = await annotateImage(data.filename);
-  } finally {
-    await recordUsage({
-      jobId: data.jobRowId,
-      kind: "vision",
-      provider: "gemini",
-      model: geminiModel,
-      units: 1,
-      costUsd: geminiImageCostUsd,
-      runtimeMs: Date.now() - started,
-    });
-  }
-
-  const parsed = ImageAnnotationSchema.safeParse(raw);
-  if (!parsed.success) {
-    throw new Error(`invalid annotation JSON: ${parsed.error.message}`);
-  }
-
-  await saveImageAnnotation(data.imageId, parsed.data);
-}
-
-async function processJob(job: Job<JobData, void, JobName>): Promise<void> {
-  await markJobRunning(job.data.jobRowId);
-
-  if (job.name === "embed_image") {
-    if (!isImageJob(job.data)) {
-      throw new Error("embed_image job is missing image fields");
-    }
-    await processEmbed(job.data);
-  } else if (job.name === "annotate_image") {
-    if (!isImageJob(job.data)) {
-      throw new Error("annotate_image job is missing image fields");
-    }
-    await processAnnotate(job.data);
-  } else if (job.name === "embed_post") {
-    if (isImageJob(job.data)) {
-      throw new Error("embed_post job is missing post fields");
-    }
-    await processEmbedPost(job.data);
-  } else {
-    throw new Error(`unknown job ${job.name}`);
-  }
-
-  await markJobSucceeded(job.data.jobRowId);
-}
-
-export async function startWorker(): Promise<Worker<JobData, void, JobName>> {
-  const worker = new Worker<JobData, void, JobName>(
-    QUEUE_NAME,
-    processJob,
-    { connection, concurrency: 1 },
+  const vector = await withUsage(jobRowId, jinaUsage, () =>
+    embedText(`${post.title}\n\n${post.body}`),
   );
+  const imageLength = await sampleEmbeddingLength(embedModel);
+  if (imageLength !== null && vector.length !== imageLength) {
+    throw new Error(`post vector length ${vector.length} does not match ${imageLength}`);
+  }
+  await upsertEmbedding("post", postId, vector, embedModel);
+}
+
+async function processJob(job: Job<JobData>): Promise<void> {
+  const data = job.data;
+  await markJobRunning(data.jobRowId);
+  switch (data.type) {
+    case "embed_image":
+      await processEmbedImage(data);
+      break;
+    case "annotate_image":
+      await processAnnotateImage(data);
+      break;
+    case "embed_post":
+      await processEmbedPost(data.jobRowId, data.postId);
+      break;
+  }
+  await markJobSucceeded(data.jobRowId);
+}
+
+export function startWorker(): Worker<JobData> {
+  const worker = new Worker<JobData>(QUEUE_NAME, processJob, { connection, concurrency: 1 });
 
   worker.on("failed", async (job, error) => {
-    if (!job) {
-      return;
-    }
-    const attempts = job.opts.attempts ?? jobAttempts;
-    if (job.attemptsMade >= attempts) {
+    if (job && job.attemptsMade >= (job.opts.attempts ?? jobAttempts)) {
       await markJobFailed(job.data.jobRowId, error.message);
     }
   });
-
   worker.on("error", (error) => {
     console.error("worker error", error);
   });
@@ -252,26 +181,14 @@ export async function startWorker(): Promise<Worker<JobData, void, JobName>> {
 }
 
 export async function closeQueue(): Promise<void> {
-  await imageQueue.close();
+  await queue.close();
   await connection.quit();
 }
 
+/** Drops queued or finished embed_image jobs from Redis so ingest can add them again. */
 export async function removeEmbedImageJobs(): Promise<number> {
-  const jobs = await imageQueue.getJobs([
-    "completed",
-    "failed",
-    "wait",
-    "waiting",
-    "delayed",
-    "paused",
-  ]);
-  let removed = 0;
-  for (const job of jobs) {
-    const id = String(job.id ?? "");
-    if (job.name === "embed_image" || id.startsWith("embed_image-")) {
-      await job.remove();
-      removed += 1;
-    }
-  }
-  return removed;
+  const jobs = await queue.getJobs(["completed", "failed", "waiting", "delayed"]);
+  const embedJobs = jobs.filter((job) => job.name === "embed_image");
+  await Promise.all(embedJobs.map((job) => job.remove()));
+  return embedJobs.length;
 }

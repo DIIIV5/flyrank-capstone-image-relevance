@@ -1,83 +1,96 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { cosineMin, guard, subjectAgreesWithLabel, type GuardImage } from "./guard.js";
+import {
+  defaultGuardRules,
+  guard,
+  subjectAgreesWithLabel,
+  type GuardImage,
+  type GuardPair,
+  type GuardRules,
+} from "./guard.js";
 
-// These tests do not call Jina or Gemini. They check the guard checks in order.
+// Pure checks against fixed rules; nothing here loads a model or opens Postgres.
 
-const foxImage: GuardImage = {
-  filename: "red-fox-01.jpg",
-  label: "fox",
-  labelScore: 0.81,
-  runnerUpScore: 0.11,
-  status: "processed",
-  subject: null,
+const rules: GuardRules = {
+  cosineMin: 0.25,
+  labelScoreMin: 0.25,
+  labelMarginMin: 0.01,
+  checkFlagged: true,
+  requireSubject: false,
 };
 
-const wolfImage: GuardImage = {
-  filename: "grey-wolf-01.jpg",
-  label: "wolf",
-  labelScore: 0.8,
-  runnerUpScore: 0.1,
-  status: "processed",
-  subject: null,
-};
+const fox: GuardImage = { label: "fox", labelScore: 0.39, runnerUpScore: 0.33, subject: null };
+const wolf: GuardImage = { label: "wolf", labelScore: 0.4, runnerUpScore: 0.34, subject: null };
 
-function run(
-  overrides: Partial<Parameters<typeof guard>[0]> & { image?: GuardImage } = {},
-) {
-  return guard({
-    expectedLabel: "fox",
-    similarity: 0.4,
-    cosineMin,
-    requireGeminiTags: false,
-    image: foxImage,
-    ...overrides,
-  });
+function run(pair: Partial<GuardPair> = {}, overrides: Partial<GuardRules> = {}) {
+  return guard(
+    { expectedLabel: "fox", similarity: 0.35, image: fox, ...pair },
+    { ...rules, ...overrides },
+  );
 }
 
-test("fox post with a fox image is suggested", () => {
-  const result = run();
-  assert.equal(result.decision, "suggested");
+test("defaultGuardRules come from config.yaml and do not require a subject", () => {
+  assert.equal(defaultGuardRules.cosineMin, 0.25);
+  assert.equal(defaultGuardRules.requireSubject, false);
+  assert.equal(guard({ expectedLabel: "fox", similarity: 0.35, image: fox }).decision, "suggested");
 });
 
-test("fox post with a wolf image rejects on subject mismatch", () => {
-  const result = run({ image: wolfImage });
+test("a fox post with a fox image is suggested", () => {
+  assert.deepEqual(run(), { decision: "suggested", reason: "cleared the guard" });
+});
+
+test("check 1: similarity under the floor is rejected first", () => {
+  const result = run({ similarity: 0.1, image: wolf });
   assert.equal(result.decision, "rejected");
-  assert.match(result.reason, /subject mismatch: expected fox, detected wolf/);
+  assert.equal(result.reason, "similarity below threshold (0.10 < 0.25)");
 });
 
-test("cosine under the floor rejects before a subject mismatch", () => {
-  const result = run({ similarity: 0.1, image: wolfImage });
-  assert.equal(result.decision, "rejected");
-  assert.match(result.reason, /similarity below threshold/);
+test("check 2: a weak label score or margin is rejected as uncertain", () => {
+  const lowScore = run({ image: { ...fox, labelScore: 0.2, runnerUpScore: 0.1 } });
+  assert.match(lowScore.reason, /uncertain subject: label score 0.20, margin 0.10/);
+  const thinMargin = run({ image: { ...fox, labelScore: 0.3, runnerUpScore: 0.295 } });
+  assert.match(thinMargin.reason, /uncertain subject/);
+  const unlabeled = run({ image: { ...fox, labelScore: null, runnerUpScore: null } });
+  assert.match(unlabeled.reason, /label score 0.00, margin 0.00/);
 });
 
-test("null expectedLabel skips the species check", () => {
-  const result = run({ expectedLabel: null, image: wolfImage });
-  assert.equal(result.decision, "suggested");
+test("check 2 can be switched off", () => {
+  const weak = { ...fox, labelScore: 0.2, runnerUpScore: 0.1 };
+  assert.equal(run({ image: weak }, { checkFlagged: false }).decision, "suggested");
 });
 
-test("null subject passes when tags are not required", () => {
-  const result = run({ requireGeminiTags: false, image: { ...foxImage, subject: null } });
-  assert.equal(result.decision, "suggested");
+test("check 3: the post's expected label must match the image label", () => {
+  const result = run({ image: wolf });
+  assert.equal(result.reason, "subject mismatch: expected fox, detected wolf");
+  const unlabeled = run({ image: { ...fox, label: null } });
+  assert.equal(unlabeled.reason, "subject mismatch: expected fox, detected none");
 });
 
-test("null subject rejects when tags are required", () => {
-  const result = run({ requireGeminiTags: true, image: { ...foxImage, subject: null } });
-  assert.equal(result.decision, "rejected");
-  assert.equal(result.reason, "missing metadata");
+test("check 3 is skipped when the post has no expected label", () => {
+  assert.equal(run({ expectedLabel: null, image: wolf }).decision, "suggested");
 });
 
-test("Gemini red fox against Jina wolf rejects on metadata disagreement", () => {
-  const result = run({
-    expectedLabel: null,
-    image: { ...wolfImage, subject: "red fox" },
-  });
-  assert.equal(result.decision, "rejected");
-  assert.match(result.reason, /metadata disagreement/);
+test("check 4: a missing Gemini subject passes unless it is required", () => {
+  assert.equal(run({ image: { ...fox, subject: "  " } }).decision, "suggested");
+  const required = run({ image: { ...fox, subject: null } }, { requireSubject: true });
+  assert.deepEqual(required, { decision: "rejected", reason: "missing metadata" });
 });
 
-test("subjectAgreesWithLabel treats tiger as its own label", () => {
+test("check 4: a Gemini subject that names a different label is rejected", () => {
+  const result = run({ expectedLabel: null, image: { ...wolf, subject: "red fox" } });
+  assert.equal(result.reason, 'metadata disagreement: Gemini subject "red fox", Jina label wolf');
+  const unlabeled = { ...wolf, label: null, subject: "red fox" };
+  assert.match(run({ expectedLabel: null, image: unlabeled }).reason, /Jina label none/);
+});
+
+test("check 4: a subject that agrees or names no label passes", () => {
+  assert.equal(run({ image: { ...fox, subject: "a red fox" } }).decision, "suggested");
+  assert.equal(run({ image: { ...fox, subject: "kitten" } }).decision, "suggested");
+});
+
+test("subjectAgreesWithLabel matches configured labels and skips the catch-all", () => {
   assert.equal(subjectAgreesWithLabel("a tiger in grass", "tiger"), "agree");
   assert.equal(subjectAgreesWithLabel("a tiger in grass", "cat"), "disagree");
+  assert.equal(subjectAgreesWithLabel("border collie", "dog"), "skip");
+  assert.equal(subjectAgreesWithLabel("some other animal", "other"), "skip");
 });

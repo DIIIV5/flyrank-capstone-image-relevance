@@ -4,19 +4,15 @@
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "lib": ["ES2022"],
-    "outDir": "dist",
-    "rootDir": "src",
+    "types": ["node"],
     "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-    "resolveJsonModule": true,
-    "declaration": false,
-    "sourceMap": false,
-    "noUncheckedIndexedAccess": true
+    "noEmit": true
   },
-  "include": ["src"],
-  "exclude": ["node_modules", "dist", "tests", "**/*.test.ts"]
+  "include": ["src"]
 }
-
-

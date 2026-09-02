@@ -1,15 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseAppConfig } from "./app-config.js";
-import { ImageLabelSchema } from "./types.js";
-
-// These tests parse config.yaml and a sample object. They do not call Jina or open Postgres.
+import { isConfiguredLabel, parseAppConfig, promptForLabel } from "./app-config.js";
 
 const base = {
   labels: ["fox", "wolf"],
-  catch_all: undefined as string | undefined,
-  score_scale: "raw" as const,
-  softmax_temperature: 1,
+  score_scale: "raw",
   label_score_min: 0.25,
   label_margin_min: 0.01,
   cosine_min: 0.25,
@@ -18,46 +13,63 @@ const base = {
     corpus: "data/images",
     posts: "data/posts",
     matching_gold: "data/eval/labels.json",
-    label_eval: {
-      fox: "data/images/eval/fox",
-      wolf: "data/images/eval/wolf",
-    },
+    label_eval: { fox: "data/images/eval/fox", wolf: "data/images/eval/wolf" },
   },
 };
 
-test("parseAppConfig accepts a two-label config", () => {
+test("parseAppConfig accepts a minimal config and defaults the temperature", () => {
   const parsed = parseAppConfig(base);
   assert.deepEqual(parsed.labels, ["fox", "wolf"]);
-  assert.equal(parsed.score_scale, "raw");
+  assert.equal(parsed.softmax_temperature, 1);
 });
 
-test("parseAppConfig rejects a label_eval key that is not in labels", () => {
-  assert.throws(() =>
-    parseAppConfig({
+test("parseAppConfig accepts catch_all and label_prompts that name known labels", () => {
+  const parsed = parseAppConfig({
+    ...base,
+    labels: ["fox", "wolf", "other"],
+    catch_all: "other",
+    label_prompts: { fox: "a photo of a red fox" },
+    paths: {
+      ...base.paths,
+      label_eval: { ...base.paths.label_eval, other: "data/images/eval/other" },
+    },
+  });
+  assert.equal(parsed.catch_all, "other");
+});
+
+test("parseAppConfig rejects inconsistent label lists", () => {
+  const cases = [
+    { ...base, labels: ["fox", "fox"] },
+    { ...base, catch_all: "cat" },
+    { ...base, label_prompts: { cat: "a photo of a cat" } },
+    { ...base, paths: { ...base.paths, label_eval: { fox: "data/images/eval/fox" } } },
+    {
       ...base,
       paths: {
         ...base.paths,
         label_eval: { ...base.paths.label_eval, cat: "data/images/eval/cat" },
       },
-    }),
-  );
+    },
+  ];
+  for (const bad of cases) {
+    assert.throws(() => parseAppConfig(bad));
+  }
 });
 
-test("parseAppConfig rejects a missing label_eval folder", () => {
-  assert.throws(() =>
-    parseAppConfig({
-      ...base,
-      paths: { ...base.paths, label_eval: { fox: "data/images/eval/fox" } },
-    }),
-  );
+test("isConfiguredLabel reads labels from config.yaml", () => {
+  assert.equal(isConfiguredLabel("fox"), true);
+  assert.equal(isConfiguredLabel("bison"), false);
 });
 
-test("ImageLabelSchema from committed config.yaml rejects bison", () => {
-  const parsed = ImageLabelSchema.safeParse({
-    label: "bison",
-    score: 0.4,
-    runnerUpLabel: "fox",
-    runnerUpScore: 0.3,
-  });
-  assert.equal(parsed.success, false);
+test("promptForLabel prefers a custom prompt, then the catch-all prompt, then the default", () => {
+  const config = { catch_all: "other", label_prompts: { fox: "a photo of a red fox" } };
+  assert.equal(promptForLabel("fox", config), "a photo of a red fox");
+  assert.equal(promptForLabel("other", config), "a photo of an animal");
+  assert.equal(promptForLabel("wolf", config), "a photo of a wolf");
+  assert.equal(promptForLabel("wolf", { catch_all: undefined }), "a photo of a wolf");
+});
+
+test("promptForLabel defaults to config.yaml", () => {
+  assert.equal(promptForLabel("fox"), "a photo of a fox");
+  assert.equal(promptForLabel("other"), "a photo of an animal");
 });

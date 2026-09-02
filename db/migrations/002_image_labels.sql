@@ -1,4 +1,4 @@
--- Keep CHECK constraints in sync with IMAGE_LABELS in src/types.ts.
+-- Add cat and big cat to the label set.
 
 ALTER TABLE images DROP CONSTRAINT IF EXISTS images_label_check;
 ALTER TABLE images DROP CONSTRAINT IF EXISTS images_runner_up_label_check;

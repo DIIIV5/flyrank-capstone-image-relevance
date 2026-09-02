@@ -1,109 +1,94 @@
-import { catchAll, checkFlagged, cosineMin, labels } from "./app-config.js";
-import { labelMarginMin, labelScoreMin } from "./labels.js";
-
-export { cosineMin };
-
-/** Guard check 2. Value comes from config.yaml check_flagged. */
-export const guardCheckFlagged = checkFlagged;
-
-/** Annotate hit the Gemini quota, so most rows have no subject. */
-export const guardRequireGeminiTags = false;
+import {
+  catchAll,
+  checkFlagged,
+  cosineMin,
+  labelMarginMin,
+  labelScoreMin,
+  labels,
+} from "./app-config.js";
+import type { Decision } from "./types.js";
 
 export type GuardImage = {
-  filename: string;
   label: string | null;
   labelScore: number | null;
   runnerUpScore: number | null;
-  status: string;
   subject: string | null;
 };
 
-export type GuardInput = {
+export type GuardPair = {
   expectedLabel: string | null;
   similarity: number;
-  cosineMin: number;
-  requireGeminiTags: boolean;
-  checkFlagged?: boolean;
   image: GuardImage;
 };
 
-const labelsLongestFirst = [...labels].sort((a, b) => b.length - a.length);
+export type GuardRules = {
+  cosineMin: number;
+  labelScoreMin: number;
+  labelMarginMin: number;
+  checkFlagged: boolean;
+  requireSubject: boolean;
+};
 
+export type GuardResult = { decision: Decision; reason: string };
+
+/** Defaults come from config.yaml. Gemini annotation is optional, so a missing subject passes. */
+export const defaultGuardRules: GuardRules = {
+  cosineMin,
+  labelScoreMin,
+  labelMarginMin,
+  checkFlagged,
+  requireSubject: false,
+};
+
+const labelsLongestFirst = [...labels]
+  .filter((name) => name !== catchAll)
+  .sort((a, b) => b.length - a.length);
+
+/** Finds the first configured label named inside the Gemini subject, longest label first. */
 export function subjectAgreesWithLabel(
   subject: string,
-  label: string,
+  label: string | null,
 ): "agree" | "disagree" | "skip" {
   const text = subject.toLowerCase();
-  const found = labelsLongestFirst.find((name) => {
-    if (catchAll && name === catchAll) {
-      return false;
-    }
-    return text.includes(name);
-  });
+  const found = labelsLongestFirst.find((name) => text.includes(name));
   if (!found) {
     return "skip";
   }
-  if (found === label) {
-    return "agree";
-  }
-  return "disagree";
+  return found === label ? "agree" : "disagree";
 }
 
-export function guard(input: GuardInput): {
-  decision: "suggested" | "rejected";
-  reason: string;
-} {
-  const { image, similarity } = input;
-  const floor = input.cosineMin;
+const reject = (reason: string): GuardResult => ({ decision: "rejected", reason });
 
-  // 1. Cosine similarity below the floor.
-  if (similarity < floor) {
-    return {
-      decision: "rejected",
-      reason: `similarity below threshold (${similarity.toFixed(2)} < ${floor.toFixed(2)})`,
-    };
+/** Checks run in order; the first failure is the reason. */
+export function guard(pair: GuardPair, rules: GuardRules = defaultGuardRules): GuardResult {
+  const { image, similarity, expectedLabel } = pair;
+
+  if (similarity < rules.cosineMin) {
+    return reject(
+      `similarity below threshold (${similarity.toFixed(2)} < ${rules.cosineMin.toFixed(2)})`,
+    );
   }
 
-  // 2. Flagged image or a weak Jina score/margin.
-  const check = input.checkFlagged ?? guardCheckFlagged;
-  if (check) {
-    const score = image.labelScore ?? 0;
-    const margin = (image.labelScore ?? 0) - (image.runnerUpScore ?? 0);
-    if (image.status === "flagged" || score < labelScoreMin || margin < labelMarginMin) {
-      return {
-        decision: "rejected",
-        reason: `uncertain subject: label score ${score.toFixed(2)}, margin ${margin.toFixed(2)}`,
-      };
-    }
+  const score = image.labelScore ?? 0;
+  const margin = score - (image.runnerUpScore ?? 0);
+  if (rules.checkFlagged && (score < rules.labelScoreMin || margin < rules.labelMarginMin)) {
+    return reject(
+      `uncertain subject: label score ${score.toFixed(2)}, margin ${margin.toFixed(2)}`,
+    );
   }
 
-  // 3. Top1 minus top2 gap — not implemented. No number was set for it.
-
-  // 4. Post species vs image label.
-  if (input.expectedLabel && image.label !== input.expectedLabel) {
-    return {
-      decision: "rejected",
-      reason: `subject mismatch: expected ${input.expectedLabel}, detected ${image.label ?? "none"}`,
-    };
+  if (expectedLabel && image.label !== expectedLabel) {
+    return reject(`subject mismatch: expected ${expectedLabel}, detected ${image.label ?? "none"}`);
   }
 
-  // 5. Gemini subject vs Jina label.
   const subject = image.subject?.trim() ?? "";
-  if (!subject) {
-    if (input.requireGeminiTags) {
-      return {
-        decision: "rejected",
-        reason: "missing metadata",
-      };
-    }
-  } else {
-    const agreement = subjectAgreesWithLabel(subject, image.label ?? "");
-    if (agreement === "disagree") {
-      return {
-        decision: "rejected",
-        reason: `metadata disagreement: Gemini subject "${subject}", Jina label ${image.label ?? "none"}`,
-      };
-    }
+  if (!subject && rules.requireSubject) {
+    return reject("missing metadata");
+  }
+  if (subject && subjectAgreesWithLabel(subject, image.label) === "disagree") {
+    return reject(
+      `metadata disagreement: Gemini subject "${subject}", Jina label ${image.label ?? "none"}`,
+    );
   }
 
   return { decision: "suggested", reason: "cleared the guard" };

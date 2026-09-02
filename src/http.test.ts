@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { mock, test } from "node:test";
 import { createApp, type HttpDeps } from "./http/app.js";
 import { RankError, type RankResult } from "./rank-result.js";
+import type { PostRow, SuggestionRow } from "./types.js";
 
-// HTTP tests use in-memory stubs. They do not open Postgres or load Jina/Gemini.
+// Handlers run against in-memory stubs. Nothing here opens Postgres or loads a model.
 
-const foxPost = {
+const foxPost: PostRow = {
   id: "post-fox",
   title: "The behaviour of red foxes",
   body: "Vulpes vulpes",
@@ -29,71 +30,41 @@ const foxRank: RankResult = {
   no_confident_match: null,
 };
 
-const pendingSuggestion = {
+const pending: SuggestionRow = {
   id: "sug-1",
-  postId: foxPost.id,
-  imageId: "img-fox",
   filename: "fox.jpg",
   caption: "A red fox standing in a forest",
   label: "fox",
-  labelScore: 0.2,
-  runnerUpScore: 0.1,
-  rank: 1,
+  labelScore: 0.39,
+  runnerUpScore: 0.33,
   similarity: 0.35,
   decision: "suggested",
   reason: "cleared the guard",
-  review: "pending" as string | null,
-  reviewedAt: null as Date | null,
+  review: "pending",
+  reviewedAt: null,
 };
 
-const noMatchSuggestion = {
-  ...pendingSuggestion,
+const noMatch: SuggestionRow = {
+  ...pending,
   id: "sug-none",
-  imageId: null,
   filename: null,
   caption: null,
   decision: "no_confident_match",
   review: null,
 };
 
-function listen(
-  app: ReturnType<typeof createApp>,
-): Promise<{ url: string; close: () => Promise<void> }> {
-  return new Promise((resolve, reject) => {
-    const server = app.listen(0, "localhost", () => {
-      const address = server.address();
-      if (!address || typeof address === "string") {
-        reject(new Error("no listen port"));
-        return;
-      }
-      resolve({
-        url: `http://localhost:${address.port}`,
-        close: () =>
-          new Promise((done, fail) => {
-            server.close((err) => (err ? fail(err) : done()));
-          }),
-      });
-    });
-  });
-}
+type Stub = HttpDeps & { replaced: [string, number][] };
 
-function stubDeps(overrides: Partial<HttpDeps> = {}): HttpDeps & { replaced: string[] } {
-  const replaced: string[] = [];
-  const suggestions = new Map([
-    [pendingSuggestion.id, { ...pendingSuggestion }],
-    [noMatchSuggestion.id, { ...noMatchSuggestion }],
-  ]);
-
+function stubDeps(): Stub {
+  const replaced: Stub["replaced"] = [];
+  const suggestions = new Map([pending, noMatch].map((row) => [row.id, { ...row }]));
   return {
     replaced,
     async getPostByTitleOrId(query) {
-      if (query === "red-fox" || query === foxPost.id) {
+      if (query === "red-fox") {
         return foxPost;
       }
-      if (query === "no-embed") {
-        return { ...foxPost, id: "post-empty", title: "Empty" };
-      }
-      return null;
+      return query === "no-embed" ? { ...foxPost, id: "post-empty", title: "Empty" } : null;
     },
     async rankForPost(post, opts) {
       if (post.id === "post-empty") {
@@ -102,10 +73,12 @@ function stubDeps(overrides: Partial<HttpDeps> = {}): HttpDeps & { replaced: str
       if (opts?.image === "missing.jpg") {
         throw new RankError("image_not_found", "image not found: missing.jpg");
       }
-      return foxRank;
+      return opts?.image
+        ? { ...foxRank, candidates: [], no_confident_match: { reason: "no confident match: x" } }
+        : foxRank;
     },
-    async replaceSuggestions(postId) {
-      replaced.push(postId);
+    async replaceSuggestions(postId, rows) {
+      replaced.push([postId, rows.length]);
     },
     async getSuggestionById(id) {
       return suggestions.get(id) ?? null;
@@ -113,123 +86,150 @@ function stubDeps(overrides: Partial<HttpDeps> = {}): HttpDeps & { replaced: str
     async setSuggestionReview(id, review) {
       const row = suggestions.get(id);
       if (!row) {
-        return null;
+        throw new Error("missing");
       }
-      const updated = {
-        ...row,
-        review,
-        reviewedAt: new Date("2026-08-24T12:00:00Z"),
-      };
+      const updated = { ...row, review, reviewedAt: new Date("2026-08-24T12:00:00Z") };
       suggestions.set(id, updated);
       return updated;
     },
-    ...overrides,
   };
 }
 
-test("unknown post returns 404", async () => {
-  const app = createApp(stubDeps());
-  const { url, close } = await listen(app);
+type JsonValue = string | number | boolean | null | JsonValue[] | Json;
+type Json = { [key: string]: JsonValue };
+
+async function request(
+  deps: HttpDeps,
+  path: string,
+  init: { method?: string; body?: string } = {},
+): Promise<{ status: number; body: Json }> {
+  const server = createApp(deps).listen(0, "localhost");
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const address = server.address();
+  const port = address && typeof address === "object" ? address.port : 0;
   try {
-    const res = await fetch(`${url}/posts/missing/images`);
-    assert.equal(res.status, 404);
-    const body = (await res.json()) as { error: string };
-    assert.match(body.error, /post not found/);
+    const res = await fetch(`http://localhost:${port}${path}`, {
+      method: init.method ?? "GET",
+      headers: { "content-type": "application/json" },
+      body: init.body,
+    });
+    const body = (await res.json()) as Json;
+    return { status: res.status, body };
   } finally {
-    await close();
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
   }
+}
+
+const review = (value: string) => ({ method: "POST", body: JSON.stringify({ review: value }) });
+
+test("GET /posts/:id/images returns 404 for an unknown post", async () => {
+  const { status, body } = await request(stubDeps(), "/posts/missing/images");
+  assert.equal(status, 404);
+  assert.equal(body.error, "post not found: missing");
 });
 
-test("post with no embedding returns 409", async () => {
-  const app = createApp(stubDeps());
-  const { url, close } = await listen(app);
-  try {
-    const res = await fetch(`${url}/posts/no-embed/images`);
-    assert.equal(res.status, 409);
-    const body = (await res.json()) as { error: string };
-    assert.match(body.error, /no embedding/);
-  } finally {
-    await close();
-  }
+test("GET /posts/:id/images returns 409 when the post has no embedding", async () => {
+  const { status, body } = await request(stubDeps(), "/posts/no-embed/images");
+  assert.equal(status, 409);
+  assert.match(String(body.error), /no embedding/);
 });
 
-test("GET /posts/:id/images does not write suggestions", async () => {
+test("GET /posts/:id/images returns 404 for an unknown forced image", async () => {
+  const { status } = await request(stubDeps(), "/posts/red-fox/images?image=missing.jpg");
+  assert.equal(status, 404);
+});
+
+test("GET /posts/:id/images returns a JSON 500 for an unexpected error", async () => {
   const deps = stubDeps();
-  const app = createApp(deps);
-  const { url, close } = await listen(app);
+  deps.rankForPost = async () => {
+    throw new Error("boom");
+  };
+  const silenced = mock.method(console, "error", () => {});
   try {
-    const res = await fetch(`${url}/posts/red-fox/images`);
-    assert.equal(res.status, 200);
-    const body = (await res.json()) as {
-      candidates: { filename: string; caption: string }[];
-    };
-    assert.equal(body.candidates[0]?.filename, "fox.jpg");
-    assert.equal(body.candidates[0]?.caption, "A red fox standing in a forest");
-    assert.deepEqual(deps.replaced, []);
+    const { status, body } = await request(deps, "/posts/red-fox/images");
+    assert.equal(status, 500);
+    assert.equal(body.error, "internal error");
   } finally {
-    await close();
+    silenced.mock.restore();
   }
+});
+
+test("GET /posts/:id/images ranks without writing suggestions", async () => {
+  const deps = stubDeps();
+  const { status, body } = await request(deps, "/posts/red-fox/images?image=");
+  assert.equal(status, 200);
+  assert.deepEqual(body, {
+    post: foxRank.post,
+    candidates: [
+      {
+        filename: "fox.jpg",
+        label: "fox",
+        similarity: 0.35,
+        decision: "suggested",
+        reason: "cleared the guard",
+        caption: "A red fox standing in a forest",
+      },
+    ],
+    no_confident_match: null,
+  });
+  assert.deepEqual(deps.replaced, []);
 });
 
 test("POST /posts/:id/images writes suggestions", async () => {
   const deps = stubDeps();
-  const app = createApp(deps);
-  const { url, close } = await listen(app);
-  try {
-    const res = await fetch(`${url}/posts/red-fox/images`, { method: "POST" });
-    assert.equal(res.status, 200);
-    assert.deepEqual(deps.replaced, [foxPost.id]);
-  } finally {
-    await close();
-  }
+  const { status } = await request(deps, "/posts/red-fox/images", { method: "POST" });
+  assert.equal(status, 200);
+  assert.deepEqual(deps.replaced, [["post-fox", 1]]);
 });
 
-test("bad review body returns 400", async () => {
-  const app = createApp(stubDeps());
-  const { url, close } = await listen(app);
-  try {
-    const res = await fetch(`${url}/suggestions/sug-1/review`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ review: "maybe" }),
-    });
-    assert.equal(res.status, 400);
-  } finally {
-    await close();
-  }
+test("POST /posts/:id/images with ?image= stores only that pair, not a no-match row", async () => {
+  const deps = stubDeps();
+  const { status, body } = await request(deps, "/posts/red-fox/images?image=wolf.jpg", {
+    method: "POST",
+  });
+  assert.equal(status, 200);
+  assert.deepEqual(body.no_confident_match, { reason: "no confident match: x" });
+  assert.deepEqual(deps.replaced, [["post-fox", 0]]);
 });
 
-test("reviewing a no_confident_match row returns 400", async () => {
-  const app = createApp(stubDeps());
-  const { url, close } = await listen(app);
-  try {
-    const res = await fetch(`${url}/suggestions/sug-none/review`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ review: "approved" }),
-    });
-    assert.equal(res.status, 400);
-    const body = (await res.json()) as { error: string };
-    assert.match(body.error, /no_confident_match/);
-  } finally {
-    await close();
-  }
+test("GET /suggestions/:id returns the row or 404", async () => {
+  const found = await request(stubDeps(), "/suggestions/sug-1");
+  assert.equal(found.status, 200);
+  assert.equal(found.body.review, "pending");
+  const missing = await request(stubDeps(), "/suggestions/nope");
+  assert.equal(missing.status, 404);
 });
 
-test("approve sets review", async () => {
-  const app = createApp(stubDeps());
-  const { url, close } = await listen(app);
-  try {
-    const res = await fetch(`${url}/suggestions/sug-1/review`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ review: "approved" }),
-    });
-    assert.equal(res.status, 200);
-    const body = (await res.json()) as { review: string; reviewedAt: string };
-    assert.equal(body.review, "approved");
-    assert.ok(body.reviewedAt);
-  } finally {
-    await close();
-  }
+test("POST /suggestions/:id/review rejects a bad body and malformed JSON", async () => {
+  const bad = await request(stubDeps(), "/suggestions/sug-1/review", review("maybe"));
+  assert.equal(bad.status, 400);
+  assert.equal(bad.body.error, "invalid review body");
+  const broken = await request(stubDeps(), "/suggestions/sug-1/review", {
+    method: "POST",
+    body: "{",
+  });
+  assert.equal(broken.status, 400);
+  assert.equal(broken.body.error, "invalid JSON");
+});
+
+test("POST /suggestions/:id/review returns 404 for an unknown row", async () => {
+  const { status } = await request(stubDeps(), "/suggestions/nope/review", review("approved"));
+  assert.equal(status, 404);
+});
+
+test("POST /suggestions/:id/review refuses a row that was not suggested", async () => {
+  const approve = review("approved");
+  const { status, body } = await request(stubDeps(), "/suggestions/sug-none/review", approve);
+  assert.equal(status, 400);
+  assert.equal(body.error, "cannot review a no_confident_match row");
+});
+
+test("POST /suggestions/:id/review approves a suggested row", async () => {
+  const approve = review("approved");
+  const { status, body } = await request(stubDeps(), "/suggestions/sug-1/review", approve);
+  assert.equal(status, 200);
+  assert.equal(body.review, "approved");
+  assert.equal(body.reviewedAt, "2026-08-24T12:00:00.000Z");
 });

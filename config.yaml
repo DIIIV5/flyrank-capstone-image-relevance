@@ -1,24 +1,25 @@
-# Closed-set labels, folder paths, and score thresholds.
-# Secrets stay in .env. Restart the worker after you change this file.
-# If you change labels or score_scale, run: npm run reset-embed-images && npm run ingest
+# Labels, folder paths, and score thresholds. Secrets go in .env.
+# Restart the worker after editing this file.
+# After changing labels or score_scale, run: npm run reset-embed-images && npm run ingest
 
 labels: [fox, wolf, dog, cat, tiger, bear, deer, cow, chicken, other]
 catch_all: other
 
-# raw = store the image-text CLIP dot. softmax = store softmax of those dots.
+# raw stores the image-text CLIP dot product; softmax stores softmax over those dots.
 score_scale: raw
 softmax_temperature: 1
 
-# Flag rule: processed when score >= label_score_min and (score - runner_up) >= label_margin_min.
+# An image is "processed" when score >= label_score_min and (score - runner_up) >= label_margin_min,
+# otherwise "flagged". Pick these from the grids that `npm run eval-labels` prints.
 label_score_min: 0.25
 label_margin_min: 0.01
 
-# Guard: refuse a pair when cosine is below this floor.
+# The guard refuses a pair whose cosine similarity is below cosine_min,
+# and (when check_flagged is true) any image that fails the rule above.
 cosine_min: 0.25
 check_flagged: true
 
-# Optional. Default prompt is "a photo of a {label}".
-# catch_all uses "a photo of an animal" unless you set a prompt here.
+# Optional. The default prompt is "a photo of a {label}"; the catch-all uses "a photo of an animal".
 # label_prompts:
 #   fox: a photo of a red fox
 

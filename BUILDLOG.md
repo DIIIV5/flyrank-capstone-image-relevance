@@ -1,19 +1,27 @@
 # Build log
 
-Notes on AI usage in this project.
+Notes on how AI was used and where it went wrong.
 
-Cursor wrote most of the matching code (`embed_post`, cosine, the guard, `npm run match`) and the first drafts of README, DESIGN, and EVIDENCE.
+## Phases 2–3
 
-Two code mistakes it had to be walked back from: a text-only Jina call that returned no embeddings, and `thinkingLevel: MINIMAL` on `gemini-3.7-flash`, which the API rejects with HTTP 400.
+Cursor wrote most of the matching code (`embed_post`, cosine ranking, the guard, `npm run match`) and first drafts of the README, DESIGN, and EVIDENCE.
 
-The document writing was a bigger problem. Drafts mixed in marketing lines from the capstone brief, defensive “this proves the rubric” headings, and implementation detail in the same paragraph. Headings were often miniature conclusions (`Matching works when the words differ`). Paragraphs restated the table the reader had just seen. Compound hyphens (`red-fox post`) showed up in strange places. Markdown-source talk (`fenced block`) was used without the end user in mind, who is expected to see the rendering and not the raw markdown code.
+Two code mistakes had to be undone: a text-only Jina call that returned no embeddings, and `thinkingLevel: MINIMAL` on `gemini-3.7-flash`, which the API rejects with HTTP 400.
 
-The docs written by AI often had the problem of being written to look complete to an evaluator rather than for a person trying to run or understand the system. Giving the AI writing tips helped but didn't totally solve the problem.
+The documents were the bigger problem. Drafts mixed marketing lines from the capstone brief, headings written as conclusions ("Matching works when the words differ"), paragraphs that restated the table above them, and markdown-source vocabulary ("fenced block") aimed at a grader rather than at someone trying to run the system. Writing guidelines helped but did not fix it.
 
 ## Phase 4
 
-Cursor drafted the Express app, `rankForPost`, the eval scripts, the extra seed articles, and the first pass at README / DESIGN / Evidence.
+Cursor drafted the Express app, `rankForPost`, the eval scripts, the extra seed articles, and another pass at the documents.
 
-Two runtime mistakes: encoding label prompts against a 1x1 placeholder (library labels and several `embed_post` jobs failed or went stale), and leaving `labelScoreMin = 0.70` on softmax over ten classes (every photo `flagged`). The label-sweep grid showed winning softmax between `0.105` and `0.114`; ingest was switched to raw CLIP dots and the flag rule to `0.25` / `0.01`.
+Two runtime mistakes: encoding the label prompts against a 1×1 placeholder image, which broke library labels and several `embed_post` jobs, and leaving `labelScoreMin = 0.70` in place after switching to softmax over ten classes, which flagged every photo. The label sweep showed winning softmax between `0.105` and `0.114`, so ingest was switched to raw CLIP dots with a `0.25` / `0.01` flag rule.
 
-The matching gold key `grey-wolf` did not match the title "Grey wolves of the northern forests" (`wolf` vs `wolves`). The eval row is now `grey-wolves`.
+The gold key `grey-wolf` did not match the title "Grey wolves of the northern forests" (`wolf` vs `wolves`). The row is now `grey-wolves`.
+
+## Phase 5: cleanup
+
+Cursor refactored the code and rewrote the documents with a fixed set of targets: no `any` or `unknown`, no dead or duplicated code, full unit-test coverage of the pure modules, and plain writing.
+
+What changed in code: row types moved to one file; re-export chains between `config`, `app-config`, `labels`, `guard`, and `rank` were removed; the guard takes its thresholds as an argument; the three job types became one discriminated union with one enqueue path; post lookup became a single query; posts got a unique title so `seed-posts` can upsert in one statement; suggestion lookups check the uuid format instead of catching a Postgres error; the `match` argument parser lost its undocumented flags. Typecheck had been failing on `req.params` typing and a bad BullMQ state name; both are fixed and the tests are now type-checked too.
+
+What could not be met: coverage of the database, queue, and model adapters needs Postgres, Redis, and the model, so they are exercised by running the system, not by `npm test`.

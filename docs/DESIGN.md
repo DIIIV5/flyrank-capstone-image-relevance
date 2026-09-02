@@ -1,27 +1,12 @@
-# Design: image–content matching
+# Design
 
-This project recommends a photo for an article when the match is good enough, and refuses it when it is not. A red fox post should get a red-fox photo; a wolf or a dog is rejected on the Jina `label`. A grey fox carries the label `fox` too, so it isn't rejected outright; it's simply left to rank below the red fox on cosine similarity. If nothing fits well enough, the result is no confident match.
+The system suggests a library photo for an article when the match is good enough and refuses it when it is not. Ranking is by vector similarity; a guard then rejects pairs that are too weak or whose labels disagree. If nothing survives, the answer is "no confident match". The diagram is in the [README](../README.md#architecture).
 
-## How it works
-
-```text
-image file  → Jina CLIP v2 → labels + image vector → Postgres
-post text   → Jina CLIP v2 → post vector           → Postgres
-                                                 ↓
-                                    rank → mismatch guard
-                                         /            \
-                                    suggest          reject + reason
-
-image file  → Gemini → tags + alt text (caption) → Postgres
-```
-
-The system has four layers — HTTP, background jobs, AI adapters, and Postgres. Models run in jobs, not in HTTP handlers.
-
-Jina CLIP v2 encodes each image and each post into a vector, using the same text tower for the post title and body as it uses to score the label prompts. Gemini writes `subject`, `category`, `attributes`, and `caption`; the caption is stored on the image row and returned as alt text. Ranking uses the stored Jina vectors.
+Models run in worker jobs, never in HTTP handlers. The HTTP layer reads stored rows and vectors only.
 
 ## Labels
 
-The closed set of names, the folder paths, and the score numbers all live in [config.yaml](../config.yaml). Ingest classifies each photo into one of the names in `labels`.
+`labels` in [config.yaml](../config.yaml) is the closed set of names (`fox`, `wolf`, ..., `other`). Ingest encodes each photo and one prompt per label with Jina CLIP v2, and stores the best and second-best label with their scores:
 
 ```json
 {
@@ -32,11 +17,13 @@ The closed set of names, the folder paths, and the score numbers all live in [co
 }
 ```
 
-`score_scale` selects how a Jina image–text dot product becomes the stored `score`, either `raw` or `softmax`. Margin is `score - runnerUpScore`; when `score >= label_score_min` and margin `>= label_margin_min`, status is `processed`. Those threshold values come from `npm run eval-labels`, not from hardcoded TypeScript constants.
+`score_scale` chooses whether the stored score is the raw image-text dot product or its softmax. A photo is `processed` when `score >= label_score_min` and `score - runnerUpScore >= label_margin_min`, otherwise `flagged`. Both thresholds are chosen from the grids printed by `npm run eval-labels`.
+
+The same text tower encodes article title and body, so article and image vectors are comparable.
 
 ## Tags and alt text
 
-Gemini returns:
+Gemini returns one JSON object per photo:
 
 ```json
 {
@@ -48,33 +35,41 @@ Gemini returns:
 }
 ```
 
-If the JSON doesn't match this schema, the job retries; once retries are exhausted, the job fails and the response is discarded. `caption` is the alt text for the image, and `category` is a broad class such as `animal` — the species itself is the Jina `label` (`fox`, `wolf`, `dog`, and so on).
+The response is validated with Zod; an invalid response fails the job, which BullMQ retries up to three times. `caption` is returned as alt text. `subject` is used only by the guard. `confidence` is stored but not used.
 
 ## Guard
 
-Images are ranked by cosine similarity of the stored vectors, then checked in order — the first check that fails becomes the rejection reason.
+The top three photos by cosine are checked in order. The first failing check is the rejection reason.
 
-1. Cosine similarity below `cosine_min` in [config.yaml](../config.yaml) → similarity below threshold.
-2. Image status is `flagged`, or Jina score or margin is below `label_score_min` / `label_margin_min` in [config.yaml](../config.yaml) → uncertain subject. `check_flagged` turns this check on or off.
-3. Gap between the top two similarities → not implemented; no gap size was set.
-4. `posts.expected_label` is set and differs from the image `label` → subject mismatch. Grey fox and red fox are both `fox`.
-5. Gemini `subject` is present and names a different word from `labels` in [config.yaml](../config.yaml) than the Jina `label` → metadata disagreement. A null or blank `subject` is skipped, but `--require-tags` turns a missing `subject` into `missing metadata`.
+1. Cosine below `cosine_min` → `similarity below threshold`.
+2. Label score or margin below `label_score_min` / `label_margin_min` → `uncertain subject`. The thresholds are re-applied from the current config, so changing them does not require a re-ingest. `check_flagged: false` turns this check off.
+3. The article's `expected_label` is set and differs from the photo's label → `subject mismatch`.
+4. Gemini's `subject` names a configured label that differs from the photo's label → `metadata disagreement`. A subject that names no label (`kitten`, `border collie`) is skipped. A missing subject passes, unless `npm run match` is given `--require-tags`, in which case it is `missing metadata`.
+
+A gap check between the first and second cosine, as described in the brief, is not implemented; no useful gap size was found.
 
 ## API
 
-Handlers read stored vectors and rows and never import `src/ai/`. The server binds to `localhost` only, and there is no auth.
+- `GET /posts/:id/images` — rank and guard from stored vectors, return JSON. `?image=<filename>` checks that one photo instead. 404 for an unknown post or filename, 409 if the post has no vector. Writes nothing.
+- `POST /posts/:id/images` — the same, then replace the article's rows in `suggestions`, including any already reviewed. Without `?image=`, a `no_confident_match` row is stored when nothing was suggested.
+- `GET /suggestions/:id` — one stored row with its photo's caption and scores.
+- `POST /suggestions/:id/review` — body `{ "review": "approved" | "rejected" }`. 400 for any other body or for a row whose decision is not `suggested`. Sets `review` and `reviewed_at`.
 
-- `GET /posts/:id/images` — live rank from stored vectors, run the guard, return JSON (`filename`, `label`, `similarity`, `decision`, `reason`, `caption` as alt text). Query `image` runs the guard on that pair only. Does not write `suggestions`. 404 if the post or forced filename is missing. 409 if the post has no embedding.
-- `POST /posts/:id/images` — same rank, then `replaceSuggestions` (creates ids for review). `replaceSuggestions` deletes existing rows for that post, including `approved` / `rejected`. Query `image` persists that pair only.
-- `GET /suggestions/:id` — one stored row plus caption, scores, `decision`, `reason`, `review`. 404 if missing. Rows exist after POST or `npm run match`.
-- `POST /suggestions/:id/review` — body `{ "review": "approved" | "rejected" }`. Zod `safeParse` returns 400. 404 if missing. 400 if `decision` is not `suggested`. Sets `review` and `reviewed_at`.
+`:id` for posts accepts a uuid, an exact title, or hyphenated words that appear in the title. The server binds to localhost and has no authentication.
 
 ## Database
 
-`db/migrations/001_init.sql` defines six tables: `images`, `posts`, `embeddings`, `suggestions`, `jobs`, and `ai_usage`. `posts.expected_label`, added in `003_posts_expected_label.sql`, is the post side of guard check 4.
+Six tables: `images`, `posts`, `embeddings`, `suggestions`, `jobs`, and `ai_usage`. Gemini fields live on `images`. `embeddings` stores one `real[]` per owner and model; there is no vector index because the library is small and ranking is done in the process. `jobs` tracks status and attempts under an idempotency key so re-running a script does not repeat finished work. `ai_usage` records every model call with runtime and list price, including failed calls.
 
-Images live in `paths.corpus` in [config.yaml](../config.yaml), and ingest reads only its top-level files. Held-out photos live in `paths.label_eval`, and seed articles live in `paths.posts`. The closed set of names is `labels` in that same file, not a SQL `IN` list.
+Label columns are checked by format only (`^[a-z][a-z0-9_]*$`); the allowed set lives in `config.yaml`.
 
-## Stack
+## Code layout
 
-TypeScript, Express, PostgreSQL, Redis, BullMQ, Transformers.js Jina CLIP v2, Gemini Flash for tags and alt text.
+- `src/app-config.ts` — parse `config.yaml`. `src/config.ts` — environment variables.
+- `src/labels.ts`, `src/similarity.ts`, `src/guard.ts`, `src/rank-result.ts`, `src/front-matter.ts` — pure logic, fully unit-tested.
+- `src/ai/jina.ts`, `src/ai/gemini.ts` — model adapters.
+- `src/db.ts` — all SQL. `src/jobs.ts` — BullMQ queue and worker. `src/rank.ts` — rank one article.
+- `src/http/app.ts` — Express routes, built from an injected dependency object so tests run without a database.
+- `src/scripts/` — one file per `npm run` command.
+
+Stack: TypeScript, Express, PostgreSQL, Redis, BullMQ, Transformers.js (Jina CLIP v2), Gemini Flash.

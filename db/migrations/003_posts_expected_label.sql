@@ -1,4 +1,4 @@
--- Keep CHECK constraints in sync with IMAGE_LABELS in src/types.ts.
+-- The post side of the subject-mismatch guard check.
 
 ALTER TABLE posts ADD COLUMN expected_label text;
 

@@ -1,13 +1,27 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { GoogleGenerativeAI } from "@google/generative-ai";
-import { geminiApiKey, geminiModel, geminiThinkingLevel, imagesDir } from "../config.js";
+import { GoogleGenerativeAI, type GenerationConfig } from "@google/generative-ai";
+import { imagesDir } from "../app-config.js";
+import { geminiApiKey, geminiModel } from "../config.js";
+import { ImageAnnotationSchema, type ImageAnnotation } from "../types.js";
 
 const mimeByExt: Record<string, string> = {
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",
   ".png": "image/png",
   ".webp": "image/webp",
+};
+
+// The SDK types do not include thinkingConfig, but the API accepts it.
+// gemini-3.7-flash rejects "minimal" with HTTP 400, so "low" is the floor.
+type ThinkingGenerationConfig = GenerationConfig & {
+  thinkingConfig: { thinkingLevel: "low" };
+};
+
+const generationConfig: ThinkingGenerationConfig = {
+  responseMimeType: "application/json",
+  temperature: 0.2,
+  thinkingConfig: { thinkingLevel: "low" },
 };
 
 const prompt = `Describe this animal photo as JSON with exactly these fields:
@@ -18,39 +32,24 @@ const prompt = `Describe this animal photo as JSON with exactly these fields:
 - confidence: number from 0 to 1
 No other keys.`;
 
-export async function annotateImage(filename: string): Promise<unknown> {
+export async function annotateImage(filename: string): Promise<ImageAnnotation> {
   if (!geminiApiKey) {
     throw new Error("GEMINI_API_KEY is not set");
   }
-
-  const ext = path.extname(filename).toLowerCase();
-  const mimeType = mimeByExt[ext];
+  const mimeType = mimeByExt[path.extname(filename).toLowerCase()];
   if (!mimeType) {
-    throw new Error(`unsupported image type: ${ext}`);
+    throw new Error(`unsupported image type: ${filename}`);
   }
 
   const bytes = await fs.readFile(path.join(imagesDir, filename));
-  const genAI = new GoogleGenerativeAI(geminiApiKey);
-  const generationConfig = {
-    responseMimeType: "application/json",
-    temperature: 0.2,
-    thinkingConfig: { thinkingLevel: geminiThinkingLevel },
-  };
-  const model = genAI.getGenerativeModel({
+  const model = new GoogleGenerativeAI(geminiApiKey).getGenerativeModel({
     model: geminiModel,
     generationConfig,
   });
 
   const result = await model.generateContent([
     { text: prompt },
-    {
-      inlineData: {
-        mimeType,
-        data: bytes.toString("base64"),
-      },
-    },
+    { inlineData: { mimeType, data: bytes.toString("base64") } },
   ]);
-
-  const text = result.response.text();
-  return JSON.parse(text) as unknown;
+  return ImageAnnotationSchema.parse(JSON.parse(result.response.text()));
 }
